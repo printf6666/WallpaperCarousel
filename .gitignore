@@ -1,7 +1,7 @@
 *.iml
 .gradle
 .kotlin
-.worknuddy-ai
+.workbuddy-ai
 /local.properties
 /.idea
 .DS_Store

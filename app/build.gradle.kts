@@ -1,3 +1,5 @@
+import com.android.build.gradle.internal.api.BaseVariantOutputImpl
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,8 +14,18 @@ android {
         applicationId = "com.example.wallpapercarousel"
         minSdk = 29          // Android 10+，覆盖 ColorOS 16
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        // 版本号用日期（yyyymmdd），保证每次发版一定大于历史任何构建，避免"降级安装"被拒
+        versionCode = 20261124
+        versionName = "1.4"
+    }
+
+    // 产物命名：app-<buildType>-v<versionName>.apk，例如 app-debug-v1.4.apk
+    applicationVariants.all {
+        val vName = versionName
+        val bt = buildType.name
+        outputs.all {
+            (this as BaseVariantOutputImpl).outputFileName = "app-$bt-v$vName.apk"
+        }
     }
 
     buildTypes {

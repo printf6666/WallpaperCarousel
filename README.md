@@ -15,7 +15,7 @@
 
 ## 安装
 
-直接安装 `app/build/outputs/apk/debug/app-debug.apk`（调试签名，可覆盖安装升级）。
+直接安装 `app/build/outputs/apk/debug/app-debug-v<版本号>.apk`（例如 `app-debug-v1.4.apk`，调试签名，可覆盖安装升级）。
 
 > 安装时若提示「禁止安装未知来源应用」，按提示允许本浏览器/文件管理器安装应用即可。
 
@@ -42,7 +42,7 @@
 - Kotlin + Jetpack Compose（Material 3），minSdk 29 / targetSdk 35
 - 换壁纸：`WallpaperManager.setBitmap()`（FLAG_SYSTEM，仅桌面），**无需 root**
 - 定时：`AlarmManager.setExactAndAllowWhileIdle()` 逐次续排（无精确闹钟权限自动降级）
-- 壁纸居中：应用内先按屏幕比例居中裁剪并缩放到位图尺寸=屏幕分辨率，系统端零缩放（不会放大数倍/靠左）
+- 壁纸尺寸：严格等于屏幕分辨率（自然方向，与当前旋转无关），系统端 scale 恒为 1（不会放大数倍/靠左）。**注意**：不能用 `WallpaperManager.getDesiredMinimumWidth()`，ColorOS 会返回约 2 倍屏宽，按它出图会导致画面被居中裁剪放大一倍
 - 图片复制到应用私有目录 `filesDir/wallpapers/`，列表顺序存于 SharedPreferences
 
 ## 构建

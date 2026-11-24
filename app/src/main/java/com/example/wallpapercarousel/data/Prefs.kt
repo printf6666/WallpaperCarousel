@@ -48,4 +48,9 @@ object Prefs {
 
     fun getNextTriggerAt(ctx: Context) = sp(ctx).getLong("next_trigger_at", 0L)
     fun setNextTriggerAt(ctx: Context, t: Long) = sp(ctx).edit().putLong("next_trigger_at", t).apply()
+
+    /** 最近一次应用壁纸的位图尺寸，用于排查"壁纸被放大"类问题 */
+    fun getLastApplied(ctx: Context) = sp(ctx).getString("last_applied", "") ?: ""
+    fun setLastApplied(ctx: Context, v: String) =
+        sp(ctx).edit().putString("last_applied", v).apply()
 }

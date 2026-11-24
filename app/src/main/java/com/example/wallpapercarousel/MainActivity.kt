@@ -111,6 +111,7 @@ fun AppScreen() {
     var settings by remember { mutableStateOf(Prefs.load(ctx)) }
     var wallpapers by remember { mutableStateOf(Prefs.getWallpaperNames(ctx)) }
     var nextAt by remember { mutableStateOf(Prefs.getNextTriggerAt(ctx)) }
+    var lastApplied by remember { mutableStateOf(Prefs.getLastApplied(ctx)) }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     var tipsExpanded by remember { mutableStateOf(false) }
 
@@ -118,6 +119,7 @@ fun AppScreen() {
         settings = Prefs.load(ctx)
         wallpapers = Prefs.getWallpaperNames(ctx)
         nextAt = Prefs.getNextTriggerAt(ctx)
+        lastApplied = Prefs.getLastApplied(ctx)
     }
 
     // 回到前台时刷新状态（下次更换时间等）
@@ -248,6 +250,13 @@ fun AppScreen() {
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            if (lastApplied.isNotEmpty()) {
+                                Text(
+                                    "上次应用：$lastApplied",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                         Switch(
                             checked = settings.enabled,

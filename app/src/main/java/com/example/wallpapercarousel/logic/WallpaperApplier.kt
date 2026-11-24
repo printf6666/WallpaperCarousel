@@ -2,9 +2,11 @@ package com.example.wallpapercarousel.logic
 
 import android.app.WallpaperManager
 import android.content.Context
-import android.graphics.Point
+import android.graphics.BitmapFactory
+import android.hardware.display.DisplayManager
+import android.util.DisplayMetrics
 import android.util.Log
-import android.view.WindowManager
+import android.view.Display
 import com.example.wallpapercarousel.data.Prefs
 import com.example.wallpapercarousel.data.WallpaperStore
 import com.example.wallpapercarousel.util.BitmapUtil
@@ -12,7 +14,7 @@ import java.io.File
 import kotlin.random.Random
 
 /**
- * 选下一张并应用到系统壁纸
+ * 选下一张并应用到系统壁纸（仅桌面）
  */
 object WallpaperApplier {
 
@@ -51,24 +53,42 @@ object WallpaperApplier {
      * 把一张图片设置为桌面壁纸（仅桌面，不修改锁屏壁纸）。
      *
      * 做法：自行把图片按屏幕比例居中裁剪并缩放到"正好等于屏幕分辨率"，
-     * 再以空裁剪提示交给系统。位图与屏幕 1:1，系统没有任何自行缩放的空间，
-     * 不会出现放大数倍或靠左显示的问题。
+     * 再以空裁剪提示交给系统。位图与屏幕 1:1，系统没有缩放空间，
+     * 桌面渲染时 scale 恒为 1，不会出现放大数倍或靠左显示的问题。
      */
     fun apply(context: Context, file: File): Boolean = synchronized(applyLock) {
-        val screen = realScreenSize(context)
+        val wm = WallpaperManager.getInstance(context)
+        val target = targetSize(context)
+
         var attempt = 0
         while (attempt < 2) {
             attempt++
             val bmp = try {
-                BitmapUtil.decodeCenterCrop(file, screen[0], screen[1])
+                BitmapUtil.decodeCenterCrop(file, target[0], target[1])
             } catch (t: Throwable) {
                 Log.e(TAG, "decode failed", t)
                 null
             } ?: return@synchronized false
 
             try {
-                val wm = WallpaperManager.getInstance(context)
                 wm.setBitmap(bmp, null, true, WallpaperManager.FLAG_SYSTEM)
+                val applied = "${bmp.width}×${bmp.height}"
+                // 读回系统实际存储的尺寸：不一致说明该 ROM 又做了二次裁剪/缩放
+                val stored = storedWallpaperSize(wm)
+                val storedText = stored?.let { "${it[0]}×${it[1]}" }
+                Log.i(
+                    TAG,
+                    "applied=$applied screen=${target[0]}x${target[1]} stored=$storedText " +
+                        "desired=${wm.desiredMinimumWidth}x${wm.desiredMinimumHeight}"
+                )
+                Prefs.setLastApplied(
+                    context,
+                    when {
+                        storedText == null -> "$applied（屏幕 ${target[0]}×${target[1]}）"
+                        storedText == applied -> "$applied ✓"
+                        else -> "$applied → 系统存储 $storedText ⚠"
+                    }
+                )
                 return@synchronized true
             } catch (t: Throwable) {
                 Log.e(TAG, "set wallpaper failed (attempt $attempt)", t)
@@ -86,18 +106,99 @@ object WallpaperApplier {
         false
     }
 
-    /** 真实屏幕分辨率（含状态栏/导航栏背后的区域） */
-    @Suppress("DEPRECATION")
-    private fun realScreenSize(context: Context): IntArray {
-        val fallback = context.resources.displayMetrics
-            .let { intArrayOf(it.widthPixels, it.heightPixels) }
-        return try {
-            val p = Point()
-            (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
-                .defaultDisplay.getRealSize(p)
-            if (p.x > 0 && p.y > 0) intArrayOf(p.x, p.y) else fallback
-        } catch (e: Exception) {
-            fallback
+    /**
+     * 读回系统实际存储的壁纸位图尺寸（只读文件头，不解码像素）。
+     * 用于验证 setBitmap 之后 ROM 有没有再动手脚，失败返回 null。
+     */
+    private fun storedWallpaperSize(wm: WallpaperManager): IntArray? = try {
+        wm.getWallpaperFile(WallpaperManager.FLAG_SYSTEM)?.use { pfd ->
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFileDescriptor(pfd.fileDescriptor, null, opts)
+            if (opts.outWidth > 0 && opts.outHeight > 0) {
+                intArrayOf(opts.outWidth, opts.outHeight)
+            } else {
+                null
+            }
         }
+    } catch (t: Throwable) {
+        Log.w(TAG, "read back wallpaper size failed", t)
+        null
     }
+
+    /**
+     * 壁纸位图的尺寸：严格等于屏幕分辨率（自然方向），不使用其它任何来源。
+     *
+     * 系统绘制桌面壁纸时按 scale = max(屏宽/图宽, 屏高/图高) 缩放并居中绘制：
+     * - 图与屏幕同尺寸 → scale = 1，画面 1:1，正常；
+     * - 图比屏幕宽（例如 2 倍宽）→ scale 仍为 1（由高度决定），但只显示中间一段，
+     *   观感就是"被放大了两倍"。
+     *
+     * 特别注意 **不能** 用 WallpaperManager.getDesiredMinimumWidth/Height()：
+     * ColorOS 启动器会声明约 2 倍屏宽的期望值（表示壁纸"可滚动"），但它实际渲染
+     * 并不滚动而是居中裁剪，按该值出图会导致整张壁纸被放大一倍。
+     * 期望值只写进日志和界面诊断，不参与计算。
+     *
+     * 尺寸还必须与当前旋转方向无关：自动轮换在后台广播里执行，可能正处于横屏应用
+     * 甚至息屏状态，若按"当前旋转方向"取尺寸就会生成一张横图（如 2400×1080），
+     * 铺到竖屏桌面上会被放大 2 倍以上 —— 这正是旧版本"概率性放大"的来源。
+     */
+    private fun targetSize(context: Context): IntArray = naturalScreenSize(context)
+
+    /**
+     * 屏幕分辨率（自然方向：竖屏设备返回 宽<=高），与当前旋转方向无关。
+     *
+     * 依次尝试：Display.getRealMetrics（逻辑真实尺寸，含系统栏区域）
+     * → Display.getMode（物理面板尺寸）→ displayMetrics 兜底。
+     * 不使用 WindowManager.defaultDisplay：后台/息屏上下文里它可能抛异常
+     * 或返回旋转后的尺寸。
+     */
+    @Suppress("DEPRECATION")
+    private fun naturalScreenSize(context: Context): IntArray {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        val display = try {
+            dm?.getDisplay(Display.DEFAULT_DISPLAY)
+        } catch (t: Throwable) {
+            Log.w(TAG, "getDisplay failed", t)
+            null
+        }
+
+        // 面板本身的方向（横屏平板为 true），决定"自然方向"是宽>高还是宽<=高
+        val panelLandscape = try {
+            val m = display?.mode
+            m != null && m.physicalWidth > m.physicalHeight
+        } catch (t: Throwable) {
+            false
+        }
+
+        // 1) 逻辑真实尺寸：包含状态栏/导航栏背后的区域，最贴近桌面实际可用范围
+        if (display != null) {
+            try {
+                val m = DisplayMetrics()
+                display.getRealMetrics(m)
+                if (m.widthPixels > 0 && m.heightPixels > 0) {
+                    return orient(m.widthPixels, m.heightPixels, panelLandscape)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "getRealMetrics failed", t)
+            }
+        }
+
+        // 2) 物理面板分辨率（天然就是自然方向）
+        try {
+            val mode = display?.mode
+            if (mode != null && mode.physicalWidth > 0 && mode.physicalHeight > 0) {
+                return orient(mode.physicalWidth, mode.physicalHeight, panelLandscape)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "getMode failed", t)
+        }
+
+        // 3) 兜底：资源里的显示尺寸（可能不含系统栏，但方向正确）
+        val fallback = context.resources.displayMetrics
+        return orient(fallback.widthPixels, fallback.heightPixels, panelLandscape)
+    }
+
+    /** 按自然方向整理宽高：竖屏设备保证 宽<=高，横屏平板保证 宽>高 */
+    private fun orient(w: Int, h: Int, landscape: Boolean): IntArray =
+        if (landscape == (w > h)) intArrayOf(w, h) else intArrayOf(h, w)
 }
