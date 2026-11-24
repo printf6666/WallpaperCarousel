@@ -286,25 +286,6 @@ fun AppScreen() {
                         ) { Text("随机") }
                     }
 
-                    Text("应用到", style = MaterialTheme.typography.labelLarge)
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        SegmentedButton(
-                            selected = settings.target == 0,
-                            onClick = { update(settings.copy(target = 0)) },
-                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3)
-                        ) { Text("桌面") }
-                        SegmentedButton(
-                            selected = settings.target == 1,
-                            onClick = { update(settings.copy(target = 1)) },
-                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3)
-                        ) { Text("锁屏") }
-                        SegmentedButton(
-                            selected = settings.target == 2,
-                            onClick = { update(settings.copy(target = 2)) },
-                            shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3)
-                        ) { Text("两者") }
-                    }
-
                     Button(
                         onClick = { rotateNow() },
                         enabled = wallpapers.isNotEmpty(),

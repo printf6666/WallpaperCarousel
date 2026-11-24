@@ -40,7 +40,7 @@ object WallpaperApplier {
             (last + 1) % names.size
         }
 
-        val ok = apply(context, WallpaperStore.file(context, names[idx]), s.target)
+        val ok = apply(context, WallpaperStore.file(context, names[idx]))
         if (ok) Prefs.setLastIndex(context, idx)
 
         if (reschedule) RotationScheduler.scheduleNext(context)
@@ -48,13 +48,13 @@ object WallpaperApplier {
     }
 
     /**
-     * 把一张图片设置为桌面/锁屏壁纸。
+     * 把一张图片设置为桌面壁纸（仅桌面，不修改锁屏壁纸）。
      *
      * 做法：自行把图片按屏幕比例居中裁剪并缩放到"正好等于屏幕分辨率"，
      * 再以空裁剪提示交给系统。位图与屏幕 1:1，系统没有任何自行缩放的空间，
      * 不会出现放大数倍或靠左显示的问题。
      */
-    fun apply(context: Context, file: File, target: Int): Boolean = synchronized(applyLock) {
+    fun apply(context: Context, file: File): Boolean = synchronized(applyLock) {
         val screen = realScreenSize(context)
         var attempt = 0
         while (attempt < 2) {
@@ -68,17 +68,8 @@ object WallpaperApplier {
 
             try {
                 val wm = WallpaperManager.getInstance(context)
-                var failed = false
-                // 分目标设置：锁屏失败不影响桌面已设置的结果
-                for (flag in flagsFor(target)) {
-                    try {
-                        wm.setBitmap(bmp, null, true, flag)
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "setBitmap flag=$flag failed", t)
-                        if (flag == WallpaperManager.FLAG_SYSTEM) failed = true
-                    }
-                }
-                if (!failed) return@synchronized true
+                wm.setBitmap(bmp, null, true, WallpaperManager.FLAG_SYSTEM)
+                return@synchronized true
             } catch (t: Throwable) {
                 Log.e(TAG, "set wallpaper failed (attempt $attempt)", t)
             }
@@ -93,12 +84,6 @@ object WallpaperApplier {
             }
         }
         false
-    }
-
-    private fun flagsFor(target: Int): IntArray = when (target) {
-        1 -> intArrayOf(WallpaperManager.FLAG_LOCK)
-        2 -> intArrayOf(WallpaperManager.FLAG_SYSTEM, WallpaperManager.FLAG_LOCK)
-        else -> intArrayOf(WallpaperManager.FLAG_SYSTEM)
     }
 
     /** 真实屏幕分辨率（含状态栏/导航栏背后的区域） */

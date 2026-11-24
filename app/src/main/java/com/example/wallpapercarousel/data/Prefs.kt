@@ -12,7 +12,6 @@ object Prefs {
         val enabled: Boolean = false,
         val intervalMinutes: Int = 30,
         val randomOrder: Boolean = false,
-        val target: Int = 0, // 0=桌面 1=锁屏 2=桌面+锁屏
     )
 
     private fun sp(ctx: Context) =
@@ -22,7 +21,6 @@ object Prefs {
         enabled = sp(ctx).getBoolean("enabled", false),
         intervalMinutes = sp(ctx).getInt("interval_minutes", 30),
         randomOrder = sp(ctx).getBoolean("random_order", false),
-        target = sp(ctx).getInt("target", 0),
     )
 
     fun save(ctx: Context, s: Settings) {
@@ -30,7 +28,6 @@ object Prefs {
             .putBoolean("enabled", s.enabled)
             .putInt("interval_minutes", s.intervalMinutes)
             .putBoolean("random_order", s.randomOrder)
-            .putInt("target", s.target)
             .apply()
     }
 
