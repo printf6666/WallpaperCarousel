@@ -94,6 +94,7 @@ import com.example.wallpapercarousel.logic.RotationScheduler
 import com.example.wallpapercarousel.logic.WallpaperApplier
 import com.example.wallpapercarousel.util.BitmapUtil
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -112,6 +113,7 @@ import androidx.compose.foundation.lazy.grid.LazyGridItemInfo
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.rememberUpdatedState
@@ -130,16 +132,62 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * 系统分享进来的图片（ACTION_SEND / ACTION_SEND_MULTIPLE）。
+     * Compose 侧收集后消费并清空，冷启动与热启动（onNewIntent）都走这里。
+     */
+    private val incomingUris = MutableStateFlow<List<Uri>>(emptyList())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { AppTheme { AppScreen() } }
+        incomingUris.value = extractImageUris(intent)
+        setContent { AppTheme { AppScreen(sharedUris = incomingUris) } }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val uris = extractImageUris(intent)
+        if (uris.isNotEmpty()) incomingUris.value = uris
+    }
+
+    /** 取分享 Intent 里的图片：优先 EXTRA_STREAM，其次 ClipData（部分相册只填后者） */
+    private fun extractImageUris(intent: Intent?): List<Uri> {
+        if (intent == null) return emptyList()
+        val fromExtra = when (intent.action) {
+            Intent.ACTION_SEND -> listOfNotNull(singleStream(intent))
+            Intent.ACTION_SEND_MULTIPLE -> multiStream(intent)
+            else -> emptyList()
+        }
+        if (fromExtra.isNotEmpty()) return fromExtra
+        val clip = intent.clipData ?: return emptyList()
+        return (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
+    }
+
+    private fun singleStream(intent: Intent): Uri? =
+        if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+
+    private fun multiStream(intent: Intent): List<Uri> {
+        val list = if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+        }
+        return list ?: emptyList()
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun AppScreen() {
+fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -186,6 +234,24 @@ fun AppScreen() {
         lastApplied = Prefs.getLastApplied(ctx)
     }
 
+    // 消费系统分享进来的图片：复制进壁纸库、刷新列表，然后清空信号避免重复处理
+    val incomingShare by sharedUris.collectAsState()
+    LaunchedEffect(incomingShare) {
+        if (incomingShare.isEmpty()) return@LaunchedEffect
+        val added = withContext(Dispatchers.IO) {
+            incomingShare.mapNotNull { WallpaperStore.add(ctx, it) }
+        }
+        sharedUris.value = emptyList()
+        if (added.isEmpty()) {
+            Toast.makeText(ctx, "添加失败，请重试", Toast.LENGTH_SHORT).show()
+        } else {
+            Prefs.setWallpaperNames(ctx, Prefs.getWallpaperNames(ctx) + added)
+            refresh()
+            Toast.makeText(ctx, "已从分享添加 ${added.size} 张壁纸", Toast.LENGTH_SHORT).show()
+            if (Prefs.load(ctx).enabled) RotationScheduler.scheduleNext(ctx)
+        }
+    }
+
     // 回到前台时刷新状态（下次更换时间等）
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -201,7 +267,6 @@ fun AppScreen() {
         RotationScheduler.onSettingsChanged(ctx)
         refresh()
     }
-
     fun rotateNow() {
         scope.launch {
             val ok = withContext(Dispatchers.IO) {
