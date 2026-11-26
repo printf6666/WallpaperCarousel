@@ -109,6 +109,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.grid.LazyGridItemInfo
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.runtime.LaunchedEffect
@@ -198,6 +199,10 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     }
     var nextAt by remember { mutableStateOf(Prefs.getNextTriggerAt(ctx)) }
     var lastApplied by remember { mutableStateOf(Prefs.getLastApplied(ctx)) }
+    // 当前正在使用的壁纸文件名（跟随 lastIndex，换序/删除后会重映射）
+    var currentName by remember {
+        mutableStateOf(wallpapers.getOrNull(Prefs.getLastIndex(ctx)))
+    }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     // 正在调整裁剪的壁纸（null 表示未打开预览页）
     var cropTarget by remember { mutableStateOf<String?>(null) }
@@ -232,6 +237,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         }
         nextAt = Prefs.getNextTriggerAt(ctx)
         lastApplied = Prefs.getLastApplied(ctx)
+        currentName = wallpapers.getOrNull(Prefs.getLastIndex(ctx))
     }
 
     // 消费系统分享进来的图片：复制进壁纸库、刷新列表，然后清空信号避免重复处理
@@ -272,8 +278,8 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             val ok = withContext(Dispatchers.IO) {
                 WallpaperApplier.applyNext(ctx, reschedule = false)
             }
-            if (ok && settings.enabled) {
-                RotationScheduler.scheduleNext(ctx)
+            if (ok) {
+                if (settings.enabled) RotationScheduler.scheduleNext(ctx)
                 refresh()
             }
             val msg = when {
@@ -298,6 +304,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             if (ok) {
                 val i = wallpapers.indexOf(name)
                 if (i >= 0) Prefs.setLastIndex(ctx, i)
+                currentName = name
                 lastApplied = Prefs.getLastApplied(ctx)
                 Toast.makeText(ctx, "应用成功", Toast.LENGTH_SHORT).show()
             } else {
@@ -650,6 +657,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                             dragOffsetState = dragOffset,
                             onUse = { useWallpaper(name) },
                             onPreview = { cropTarget = name },
+                            isCurrent = name == currentName,
                             onDelete = { pendingDelete = name }
                         )
                     }
@@ -712,11 +720,14 @@ fun WallpaperItem(
     dragOffsetState: State<Offset>,
     onUse: () -> Unit,
     onPreview: () -> Unit,
+    isCurrent: Boolean,
     onDelete: () -> Unit
 ) {
     val ctx = LocalContext.current
     // 每张固定相位，抖动不同步，观感更接近 iOS 删除模式
     val phase = remember(name) { (name.hashCode() and 0xFF) / 255f }
+    // "当前使用"态需要一个无水波交互源，用来吞掉点击又不产生误导性反馈
+    val noRipple = remember { MutableInteractionSource() }
     Box(
         modifier = modifier
             .aspectRatio(1f)
@@ -774,17 +785,35 @@ fun WallpaperItem(
             )
         }
 
-        // 一键使用：半透明胶囊按钮，固定贴在缩略图下方居中
+        // 一键使用：半透明胶囊按钮，固定贴在缩略图下方居中。
+        // 已经是当前壁纸时显示"当前使用"，并禁用点击。
         Text(
-            text = "使用",
-            color = Color.White,
+            text = if (isCurrent) "当前使用" else "使用",
+            color = if (isCurrent) {
+                MaterialTheme.colorScheme.onPrimary
+            } else {
+                Color.White
+            },
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 6.dp)
                 .clip(RoundedCornerShape(50))
-                .background(Color(0x59000000))
-                .clickable(onClick = onUse)
+                .background(
+                    if (isCurrent) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.92f)
+                    } else {
+                        Color(0x59000000)
+                    }
+                )
+                .then(
+                    if (isCurrent) {
+                        // 已是当前壁纸：吞掉点击，既不重复应用，也不穿透到缩略图打开裁剪页
+                        Modifier.clickable(interactionSource = noRipple, indication = null) { }
+                    } else {
+                        Modifier.clickable(onClick = onUse)
+                    }
+                )
                 .padding(horizontal = 14.dp, vertical = 3.dp)
         )
     }
