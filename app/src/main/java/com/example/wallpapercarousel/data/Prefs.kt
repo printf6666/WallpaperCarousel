@@ -1,6 +1,7 @@
 package com.example.wallpapercarousel.data
 
 import android.content.Context
+import android.graphics.RectF
 import org.json.JSONArray
 
 /**
@@ -53,4 +54,27 @@ object Prefs {
     fun getLastApplied(ctx: Context) = sp(ctx).getString("last_applied", "") ?: ""
     fun setLastApplied(ctx: Context, v: String) =
         sp(ctx).edit().putString("last_applied", v).apply()
+
+    // ── 手动裁剪区域 ──
+    // 存归一化矩形（0..1，相对源图），与图片分辨率无关，换机/重装都能用
+    fun getCrop(ctx: Context, name: String): RectF? {
+        val raw = sp(ctx).getString("crop_$name", null) ?: return null
+        val p = raw.split(",")
+        if (p.size != 4) return null
+        return try {
+            val l = p[0].toFloat()
+            val t = p[1].toFloat()
+            val r = p[2].toFloat()
+            val b = p[3].toFloat()
+            if (r <= l || b <= t) null else RectF(l, t, r, b)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun setCrop(ctx: Context, name: String, r: RectF) = sp(ctx).edit()
+        .putString("crop_$name", "${r.left},${r.top},${r.right},${r.bottom}")
+        .apply()
+
+    fun clearCrop(ctx: Context, name: String) = sp(ctx).edit().remove("crop_$name").apply()
 }

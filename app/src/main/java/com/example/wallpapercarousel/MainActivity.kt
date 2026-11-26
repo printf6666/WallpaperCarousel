@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -18,9 +19,11 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -32,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -55,6 +59,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,6 +82,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -93,6 +99,35 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.lazy.grid.LazyGridItemInfo
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.zIndex
+import kotlin.math.PI
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -109,15 +144,44 @@ fun AppScreen() {
     val scope = rememberCoroutineScope()
 
     var settings by remember { mutableStateOf(Prefs.load(ctx)) }
-    var wallpapers by remember { mutableStateOf(Prefs.getWallpaperNames(ctx)) }
+    // SnapshotStateList：拖拽排序时就地移动，避免 pointerInput 因列表重建而被重启
+    val wallpapers = remember {
+        mutableStateListOf<String>().apply { addAll(Prefs.getWallpaperNames(ctx)) }
+    }
     var nextAt by remember { mutableStateOf(Prefs.getNextTriggerAt(ctx)) }
     var lastApplied by remember { mutableStateOf(Prefs.getLastApplied(ctx)) }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
+    // 正在调整裁剪的壁纸（null 表示未打开预览页）
+    var cropTarget by remember { mutableStateOf<String?>(null) }
     var tipsExpanded by remember { mutableStateOf(false) }
+
+    // 长按进入的"抖动编辑态"
+    var editing by remember { mutableStateOf(false) }
+    val editState = rememberUpdatedState(editing)
+    val jiggle = remember { Animatable(0f) }
+    val jiggleState = jiggle.asState()
+    LaunchedEffect(editing) {
+        if (editing) {
+            jiggle.snapTo(0f)
+            jiggle.animateTo(
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 320, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart
+                )
+            )
+        } else {
+            jiggle.snapTo(0f)
+        }
+    }
 
     fun refresh() {
         settings = Prefs.load(ctx)
-        wallpapers = Prefs.getWallpaperNames(ctx)
+        val names = Prefs.getWallpaperNames(ctx)
+        if (names != wallpapers.toList()) {
+            wallpapers.clear()
+            wallpapers.addAll(names)
+        }
         nextAt = Prefs.getNextTriggerAt(ctx)
         lastApplied = Prefs.getLastApplied(ctx)
     }
@@ -153,6 +217,27 @@ fun AppScreen() {
                 else -> "更换失败，请稍后重试"
             }
             Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * 一键使用指定壁纸：直接写入桌面壁纸，不弹窗、不跳转，仅用 Toast 给一句反馈。
+     * 同时把"上次播放位置"指向这张，顺序轮播下次从这里继续。
+     */
+    fun useWallpaper(name: String) {
+        scope.launch {
+            val crop = Prefs.getCrop(ctx, name)
+            val ok = withContext(Dispatchers.IO) {
+                WallpaperApplier.apply(ctx, WallpaperStore.file(ctx, name), crop)
+            }
+            if (ok) {
+                val i = wallpapers.indexOf(name)
+                if (i >= 0) Prefs.setLastIndex(ctx, i)
+                lastApplied = Prefs.getLastApplied(ctx)
+                Toast.makeText(ctx, "应用成功", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(ctx, "应用失败，请重试", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -212,7 +297,27 @@ fun AppScreen() {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("壁纸轮播") }) },
+        topBar = {
+            TopAppBar(title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("壁纸轮播")
+                    // 侧载安装容易装错包，标题旁直接显示当前版本，方便核对
+                    val vName = remember {
+                        runCatching {
+                            ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+                        }.getOrNull().orEmpty()
+                    }
+                    if (vName.isNotEmpty()) {
+                        Text(
+                            "v$vName",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
+                    }
+                }
+            })
+        },
         floatingActionButton = {
             FloatingActionButton(onClick = {
                 pickerLauncher.launch(
@@ -348,8 +453,23 @@ fun AppScreen() {
                 }
             }
 
-            // ── 壁纸列表 ──
-            Text("我的壁纸（${wallpapers.size}）", style = MaterialTheme.typography.titleMedium)
+            // ── 壁纸列表（长按拖拽排序） ──
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "我的壁纸（${wallpapers.size}）",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                if (editing) {
+                    TextButton(onClick = { editing = false }) { Text("完成") }
+                } else if (wallpapers.size > 1) {
+                    Text(
+                        "长按排序 · 点击裁剪",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
             if (wallpapers.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -365,21 +485,129 @@ fun AppScreen() {
                     )
                 }
             } else {
+                val gridState = rememberLazyGridState()
+                // 正在拖拽的壁纸文件名；null 表示未拖拽
+                val draggingKey = remember { mutableStateOf<String?>(null) }
+                // 被拖项相对其"当前槽位"的位移（换位时做补偿，避免视觉跳变）
+                val dragOffset = remember { mutableStateOf(Offset.Zero) }
+                // 拖拽前"上次播放到的那张"，用于换序后把索引重映射到同一张
+                val dragLastName = remember { mutableStateOf<String?>(null) }
+
+                val commitOrder = {
+                    val key = draggingKey.value
+                    draggingKey.value = null
+                    dragOffset.value = Offset.Zero
+                    if (key != null) {
+                        Prefs.setWallpaperNames(ctx, wallpapers.toList())
+                        val ni = dragLastName.value?.let { wallpapers.indexOf(it) } ?: -1
+                        if (ni >= 0) Prefs.setLastIndex(ctx, ni)
+                    }
+                }
+
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(3),
+                    state = gridState,
+                    userScrollEnabled = draggingKey.value == null,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(260.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .height(260.dp)
+                        .pointerInput(Unit) {
+                            var lastAutoScroll = 0L
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { pos ->
+                                    val hit = gridState.layoutInfo.visibleItemsInfo
+                                        .firstOrNull { it.hitTest(pos) }
+                                    if (hit != null) {
+                                        draggingKey.value = wallpapers.getOrNull(hit.index)
+                                        dragOffset.value = Offset.Zero
+                                        dragLastName.value =
+                                            wallpapers.getOrNull(Prefs.getLastIndex(ctx))
+                                        editing = true
+                                    }
+                                },
+                                onDrag = { change, delta ->
+                                    val key = draggingKey.value
+                                        ?: return@detectDragGesturesAfterLongPress
+                                    dragOffset.value += delta
+                                    val info = gridState.layoutInfo
+                                    val cur = info.visibleItemsInfo.firstOrNull {
+                                        wallpapers.getOrNull(it.index) == key
+                                    }
+                                    val tgt = info.visibleItemsInfo.firstOrNull {
+                                        it.hitTest(change.position)
+                                    }
+                                    // 命中别的格子：就地搬移，其余项自动让位/补位
+                                    if (cur != null && tgt != null && cur.index != tgt.index) {
+                                        val moved = wallpapers.removeAt(cur.index)
+                                        wallpapers.add(tgt.index, moved)
+                                        // 槽位从 cur 换到 tgt，补偿差值让被拖项视觉上留在原位
+                                        dragOffset.value += Offset(
+                                            (cur.offset.x - tgt.offset.x).toFloat(),
+                                            (cur.offset.y - tgt.offset.y).toFloat()
+                                        )
+                                    }
+                                    // 靠近上下边缘时自动滚动
+                                    val edge = 56f
+                                    val y = change.position.y
+                                    val h = size.height.toFloat()
+                                    val s = when {
+                                        y < edge -> -((edge - y) / edge) * 14f
+                                        y > h - edge -> ((y - (h - edge)) / edge) * 14f
+                                        else -> 0f
+                                    }
+                                    val now = System.currentTimeMillis()
+                                    if (s != 0f && now - lastAutoScroll > 40) {
+                                        lastAutoScroll = now
+                                        scope.launch { gridState.scrollBy(s) }
+                                        // 内容滚动会让槽位整体位移，同步补偿
+                                        dragOffset.value += Offset(0f, s)
+                                    }
+                                },
+                                onDragEnd = { commitOrder() },
+                                onDragCancel = { commitOrder() }
+                            )
+                        }
                 ) {
-                    items(wallpapers) { name ->
-                        WallpaperItem(name = name, onDelete = { pendingDelete = name })
+                    items(wallpapers, key = { it }) { name ->
+                        val dragging = draggingKey.value == name
+                        WallpaperItem(
+                            name = name,
+                            modifier = Modifier
+                                .zIndex(if (dragging) 1f else 0f)
+                                .then(
+                                    if (dragging) Modifier else Modifier.animateItem()
+                                ),
+                            editState = editState,
+                            jiggleState = jiggleState,
+                            draggingKeyState = draggingKey,
+                            dragOffsetState = dragOffset,
+                            onUse = { useWallpaper(name) },
+                            onPreview = { cropTarget = name },
+                            onDelete = { pendingDelete = name }
+                        )
                     }
                 }
             }
             Spacer(Modifier.height(48.dp))
         }
+    }
+
+    // ── 裁剪预览页 ──
+    cropTarget?.let { name ->
+        val size = remember { WallpaperApplier.targetSizePx(ctx) }
+        CropDialog(
+            name = name,
+            aspect = size[0].toFloat() / size[1].toFloat(),
+            initial = remember(name) { Prefs.getCrop(ctx, name) },
+            onDismiss = { cropTarget = null },
+            onConfirm = { crop ->
+                cropTarget = null
+                if (crop == null) Prefs.clearCrop(ctx, name) else Prefs.setCrop(ctx, name, crop)
+                useWallpaper(name)
+            }
+        )
     }
 
     pendingDelete?.let { name ->
@@ -389,8 +617,14 @@ fun AppScreen() {
             text = { Text("确定要删除这张壁纸吗？") },
             confirmButton = {
                 TextButton(onClick = {
+                    // 先记住"上次播放到的那张"，删除后把索引重映射到同一张
+                    val lastName = wallpapers.getOrNull(Prefs.getLastIndex(ctx))
                     WallpaperStore.remove(ctx, name)
-                    Prefs.setWallpaperNames(ctx, Prefs.getWallpaperNames(ctx) - name)
+                    Prefs.clearCrop(ctx, name)
+                    wallpapers.remove(name)
+                    Prefs.setWallpaperNames(ctx, wallpapers.toList())
+                    val ni = lastName?.let { wallpapers.indexOf(it) } ?: -1
+                    Prefs.setLastIndex(ctx, ni)
                     pendingDelete = null
                     refresh()
                     if (settings.enabled) RotationScheduler.scheduleNext(ctx)
@@ -404,12 +638,40 @@ fun AppScreen() {
 }
 
 @Composable
-fun WallpaperItem(name: String, onDelete: () -> Unit) {
+fun WallpaperItem(
+    name: String,
+    modifier: Modifier = Modifier,
+    editState: State<Boolean>,
+    jiggleState: State<Float>,
+    draggingKeyState: State<String?>,
+    dragOffsetState: State<Offset>,
+    onUse: () -> Unit,
+    onPreview: () -> Unit,
+    onDelete: () -> Unit
+) {
     val ctx = LocalContext.current
+    // 每张固定相位，抖动不同步，观感更接近 iOS 删除模式
+    val phase = remember(name) { (name.hashCode() and 0xFF) / 255f }
     Box(
-        modifier = Modifier
+        modifier = modifier
             .aspectRatio(1f)
+            // graphicsLayer 内的状态读取只触发图层更新，不触发重组，保证 60fps
+            .graphicsLayer {
+                if (draggingKeyState.value == name) {
+                    // 被拖项：跟手移动 + 轻微放大
+                    translationX = dragOffsetState.value.x
+                    translationY = dragOffsetState.value.y
+                    scaleX = 1.06f
+                    scaleY = 1.06f
+                    rotationZ = 0f
+                } else if (editState.value) {
+                    // 编辑态：左右轻摆
+                    rotationZ = sin((jiggleState.value + phase) * (2f * PI.toFloat())) * 1.8f
+                }
+            }
             .clip(RoundedCornerShape(12.dp))
+            // 点击缩略图进入裁剪预览；编辑态下不响应，避免长按拖拽松手时误开预览
+            .clickable { if (!editState.value) onPreview() }
     ) {
         val bitmap by produceState<Bitmap?>(initialValue = null, key1 = name) {
             value = withContext(Dispatchers.IO) {
@@ -446,8 +708,194 @@ fun WallpaperItem(name: String, onDelete: () -> Unit) {
                 modifier = Modifier.size(16.dp)
             )
         }
+
+        // 一键使用：半透明胶囊按钮，固定贴在缩略图下方居中
+        Text(
+            text = "使用",
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 6.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color(0x59000000))
+                .clickable(onClick = onUse)
+                .padding(horizontal = 14.dp, vertical = 3.dp)
+        )
     }
 }
+
+/**
+ * 裁剪预览页：视图框比例 = 最终壁纸比例，框内所见即最终效果。
+ * 双指捏合缩放、拖动平移，确认后把可见区域换算成归一化矩形持久化。
+ */
+@Composable
+fun CropDialog(
+    name: String,
+    aspect: Float,
+    initial: RectF?,
+    onDismiss: () -> Unit,
+    onConfirm: (RectF?) -> Unit
+) {
+    val ctx = LocalContext.current
+    val path = remember(name) { WallpaperStore.file(ctx, name).absolutePath }
+    val bmp by produceState<Bitmap?>(null, name) {
+        // 预览用降采样图即可（1600px），避免大图 OOM；归一化裁剪坐标与分辨率无关
+        value = withContext(Dispatchers.IO) { BitmapUtil.decodeScaled(path, 1600) }
+    }
+    val imageBitmap = remember(bmp) { bmp?.asImageBitmap() }
+
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var cleared by remember { mutableStateOf(false) }
+    var inited by remember { mutableStateOf(false) }
+
+    fun coverScale(img: Bitmap, vs: IntSize): Float =
+        max(vs.width.toFloat() / img.width, vs.height.toFloat() / img.height)
+
+    fun centerOffset(img: Bitmap, vs: IntSize): Offset {
+        val cover = coverScale(img, vs)
+        return Offset(
+            (vs.width - img.width * cover) / 2f,
+            (vs.height - img.height * cover) / 2f
+        )
+    }
+
+    // 首次布局后：有历史裁剪就还原，否则居中铺满
+    LaunchedEffect(bmp, viewSize) {
+        val img = bmp ?: return@LaunchedEffect
+        if (viewSize.width == 0 || viewSize.height == 0 || inited) return@LaunchedEffect
+        val cover = coverScale(img, viewSize)
+        val c = initial
+        if (c != null && c.width() > 0f && c.height() > 0f) {
+            val s = viewSize.width / (c.width() * img.width) // 源图像素 → 视图像素
+            zoom = (s / cover).coerceIn(1f, 8f)
+            offset = Offset(-c.left * img.width * s, -c.top * img.height * s)
+        } else {
+            zoom = 1f
+            offset = centerOffset(img, viewSize)
+        }
+        inited = true
+    }
+
+    fun currentCrop(): RectF? {
+        val img = bmp ?: return null
+        if (viewSize.width == 0 || viewSize.height == 0) return null
+        val s = coverScale(img, viewSize) * zoom
+        val l = (-offset.x) / (img.width * s)
+        val t = (-offset.y) / (img.height * s)
+        val r = (viewSize.width - offset.x) / (img.width * s)
+        val b = (viewSize.height - offset.y) / (img.height * s)
+        return RectF(
+            l.coerceIn(0f, 1f), t.coerceIn(0f, 1f),
+            r.coerceIn(0f, 1f), b.coerceIn(0f, 1f)
+        )
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("调整裁剪", style = MaterialTheme.typography.titleMedium)
+
+                val screenH = LocalConfiguration.current.screenHeightDp.dp
+                BoxWithConstraints(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                // 预览框取「可用宽度」与「屏幕高度 58%」的较小者：
+                // 竖屏壁纸比例约 0.45，若宽度撑满，高度会超过屏幕，把按钮顶到屏幕外
+                val previewW = minOf(maxWidth, screenH * 0.58f * aspect)
+                Box(
+                    modifier = Modifier
+                        .width(previewW)
+                        .height(previewW / aspect)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.Black)
+                        .onSizeChanged { viewSize = it }
+                        .pointerInput(bmp, viewSize) {
+                            detectTransformGestures { centroid, pan, gestureZoom, _ ->
+                                val img = bmp ?: return@detectTransformGestures
+                                if (viewSize.width == 0 || viewSize.height == 0) {
+                                    return@detectTransformGestures
+                                }
+                                val cover = coverScale(img, viewSize)
+                                val oldScale = cover * zoom
+                                val newZoom = (zoom * gestureZoom).coerceIn(1f, 8f)
+                                val newScale = cover * newZoom
+                                // 以捏合中心为锚点，缩放时手指下的内容不跑偏
+                                val anchor = (centroid - offset) / oldScale
+                                val w = img.width * newScale
+                                val h = img.height * newScale
+                                val nx = (centroid.x - anchor.x * newScale + pan.x)
+                                    .coerceIn(viewSize.width - w, 0f)
+                                val ny = (centroid.y - anchor.y * newScale + pan.y)
+                                    .coerceIn(viewSize.height - h, 0f)
+                                zoom = newZoom
+                                offset = Offset(nx, ny)
+                                cleared = false
+                            }
+                        }
+                ) {
+                    val ib = imageBitmap
+                    val img = bmp
+                    if (ib != null && img != null) {
+                        Canvas(Modifier.fillMaxSize()) {
+                            val s = coverScale(img, viewSize) * zoom
+                            drawImage(
+                                image = ib,
+                                dstOffset = IntOffset(offset.x.roundToInt(), offset.y.roundToInt()),
+                                dstSize = IntSize(
+                                    (img.width * s).roundToInt(),
+                                    (img.height * s).roundToInt()
+                                )
+                            )
+                        }
+                    } else {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("加载中…", color = Color.White)
+                        }
+                    }
+                }
+                }
+
+                Text(
+                    "双指捏合缩放，拖动调整位置；框内即最终效果",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                // 操作行：居中构图 / 取消 / 应用
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = {
+                        // 一键回正：缩放回到 1×、位置归中，并清除已保存的裁剪（确认时生效）
+                        val img = bmp
+                        if (img != null && viewSize.width > 0) {
+                            zoom = 1f
+                            offset = centerOffset(img, viewSize)
+                        }
+                        cleared = true
+                    }) { Text("居中构图") }
+                    TextButton(onClick = onDismiss) { Text("取消") }
+                    TextButton(onClick = {
+                        onConfirm(if (cleared) null else currentCrop())
+                    }) { Text("应用") }
+                }
+            }
+        }
+    }
+}
+
+/** 触点是否落在该格子内（LazyGridItemInfo 只暴露 offset/size，没有 bounds） */
+private fun LazyGridItemInfo.hitTest(pos: Offset): Boolean =
+    pos.x >= offset.x && pos.x < offset.x + size.width &&
+        pos.y >= offset.y && pos.y < offset.y + size.height
 
 @Composable
 fun AppTheme(content: @Composable () -> Unit) {

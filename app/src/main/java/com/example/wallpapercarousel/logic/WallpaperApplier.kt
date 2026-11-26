@@ -3,6 +3,7 @@ package com.example.wallpapercarousel.logic
 import android.app.WallpaperManager
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.graphics.RectF
 import android.hardware.display.DisplayManager
 import android.util.DisplayMetrics
 import android.util.Log
@@ -42,7 +43,11 @@ object WallpaperApplier {
             (last + 1) % names.size
         }
 
-        val ok = apply(context, WallpaperStore.file(context, names[idx]))
+        val ok = apply(
+            context,
+            WallpaperStore.file(context, names[idx]),
+            Prefs.getCrop(context, names[idx])
+        )
         if (ok) Prefs.setLastIndex(context, idx)
 
         if (reschedule) RotationScheduler.scheduleNext(context)
@@ -56,7 +61,7 @@ object WallpaperApplier {
      * 再以空裁剪提示交给系统。位图与屏幕 1:1，系统没有缩放空间，
      * 桌面渲染时 scale 恒为 1，不会出现放大数倍或靠左显示的问题。
      */
-    fun apply(context: Context, file: File): Boolean = synchronized(applyLock) {
+    fun apply(context: Context, file: File, crop: RectF? = null): Boolean = synchronized(applyLock) {
         val wm = WallpaperManager.getInstance(context)
         val target = targetSize(context)
 
@@ -64,7 +69,7 @@ object WallpaperApplier {
         while (attempt < 2) {
             attempt++
             val bmp = try {
-                BitmapUtil.decodeCenterCrop(file, target[0], target[1])
+                BitmapUtil.decodeCenterCrop(file, target[0], target[1], crop)
             } catch (t: Throwable) {
                 Log.e(TAG, "decode failed", t)
                 null
@@ -143,6 +148,9 @@ object WallpaperApplier {
      * 铺到竖屏桌面上会被放大 2 倍以上 —— 这正是旧版本"概率性放大"的来源。
      */
     private fun targetSize(context: Context): IntArray = naturalScreenSize(context)
+
+    /** 壁纸目标尺寸（宽, 高），供裁剪预览页使用同一比例 */
+    fun targetSizePx(context: Context): IntArray = naturalScreenSize(context)
 
     /**
      * 屏幕分辨率（自然方向：竖屏设备返回 宽<=高），与当前旋转方向无关。

@@ -14,9 +14,17 @@ android {
         applicationId = "com.example.wallpapercarousel"
         minSdk = 29          // Android 10+，覆盖 ColorOS 16
         targetSdk = 35
-        // 版本号用日期（yyyymmdd），保证每次发版一定大于历史任何构建，避免"降级安装"被拒
-        versionCode = 20261124
-        versionName = "1.4"
+
+        // ── 真实语义化版本号（不再用日期）──
+        // 发版时只改这三个数字：功能更新动 minor，修 bug 动 patch（一天发多次也能正确递增）
+        val appMajor = 1
+        val appMinor = 6
+        val appPatch = 4
+        versionName = "$appMajor.$appMinor.$appPatch"
+
+        // versionCode 只用于系统判断"能否覆盖安装"，单调递增即可，用户看不到。
+        // 基数 3000 万是为了高于历史上误用的日期版本号（20261126），避免被判成降级而拒装。
+        versionCode = 30_000_000 + appMajor * 10_000 + appMinor * 100 + appPatch
     }
 
     // 产物命名：app-<buildType>-v<versionName>.apk，例如 app-debug-v1.4.apk
