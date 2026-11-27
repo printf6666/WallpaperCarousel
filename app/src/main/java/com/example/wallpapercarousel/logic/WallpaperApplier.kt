@@ -14,7 +14,6 @@ import com.example.wallpapercarousel.data.WallpaperStore
 import com.example.wallpapercarousel.util.BitmapUtil
 import java.io.File
 import java.io.FileInputStream
-import kotlin.random.Random
 
 /**
  * 选下一张并应用到系统壁纸（仅桌面）
@@ -27,30 +26,70 @@ object WallpaperApplier {
     private val applyLock = Any()
 
     /**
-     * 应用下一张壁纸。随机模式避免与上一张重复。
-     * @return 是否成功应用（没有可用壁纸或设置失败时返回 false）
+     * 应用下一张壁纸。
+     *
+     * 播放范围：
+     * - 分组播放：只在当前组里挑；开了「自动切组」时先按星期/时段规则解析当前组；
+     * - 全部播放：所有壁纸一个池子，忽略分组。
+     *
+     * 切换方式：分组播放用组自己的 mode，全部播放用设置里的 randomOrder。
+     * 随机模式不会连续重复同一张；顺序模式从"上次应用的那张"往后走一格。
      */
     fun applyNext(context: Context, reschedule: Boolean = false): Boolean {
         val s = Prefs.load(context)
-        val names = Prefs.getWallpaperNames(context)
-            .filter { WallpaperStore.file(context, it).exists() }
-        if (names.isEmpty()) return false
+        val groups = Prefs.groups(context)
 
-        val last = Prefs.getLastIndex(context)
-        val idx = if (s.randomOrder && names.size > 1) {
-            var r = Random.nextInt(names.size)
-            if (r == last) r = (r + 1) % names.size
-            r
+        // 自动模式：命中规则的组优先，没命中就保持用户手动选的那组
+        if (!s.scopeAll && s.autoSwitch) {
+            val resolved = GroupResolver.matching(groups)?.id
+            if (resolved != null && resolved != Prefs.currentGroupId(context)) {
+                Log.i(TAG, "auto switch group -> $resolved")
+                Prefs.setCurrentGroupId(context, resolved)
+            }
+        }
+        val groupId = Prefs.currentGroupId(context)
+
+        val all = Prefs.getWallpaperNames(context)
+            .filter { WallpaperStore.file(context, it).exists() }
+        if (all.isEmpty()) return false
+
+        val groupIndex = groups.mapIndexed { i, g -> g.id to i }.toMap()
+        val pool = if (s.scopeAll) {
+            // 全部播放也遵守"组与组之间的顺序"：先按组分块，块内保持全局顺序
+            all.sortedBy { groupIndex[Prefs.wallpaperGroup(context, it)] ?: Int.MAX_VALUE }
         } else {
-            (last + 1) % names.size
+            val inGroup = all.filter { Prefs.wallpaperGroup(context, it) == groupId }
+            // 组里还没放图时不空转，退回全部，用户加完图后自动恢复正常
+            if (inGroup.isEmpty()) all else inGroup
         }
 
-        val ok = apply(
-            context,
-            WallpaperStore.file(context, names[idx]),
-            Prefs.getCrop(context, names[idx])
-        )
-        if (ok) Prefs.setLastIndex(context, idx)
+        val random = if (s.scopeAll) {
+            s.randomOrder
+        } else {
+            groups.firstOrNull { it.id == groupId }?.mode == Prefs.MODE_RANDOM
+        }
+
+        val lastName = Prefs.getLastName(context)
+        val idx = when {
+            random && pool.size > 1 -> {
+                // 排除上一张，避免连续重复
+                val candidates = pool.filter { it != lastName }
+                pool.indexOf(candidates.random())
+            }
+            else -> {
+                val li = pool.indexOf(lastName)
+                if (li < 0) 0 else (li + 1) % pool.size
+            }
+        }
+
+        val name = pool[idx]
+        val ok = apply(context, WallpaperStore.file(context, name), Prefs.getCrop(context, name))
+        if (ok) {
+            Prefs.setLastName(context, name)
+            // 同步更新旧索引，兼容仍按索引读取的历史逻辑
+            val gi = Prefs.getWallpaperNames(context).indexOf(name)
+            if (gi >= 0) Prefs.setLastIndex(context, gi)
+        }
 
         if (reschedule) RotationScheduler.scheduleNext(context)
         return ok

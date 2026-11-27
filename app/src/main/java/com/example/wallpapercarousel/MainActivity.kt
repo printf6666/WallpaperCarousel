@@ -93,6 +93,9 @@ import com.example.wallpapercarousel.data.WallpaperStore
 import com.example.wallpapercarousel.logic.RotationScheduler
 import com.example.wallpapercarousel.logic.WallpaperApplier
 import com.example.wallpapercarousel.logic.WallpaperCache
+import com.example.wallpapercarousel.ui.GroupChips
+import com.example.wallpapercarousel.ui.GroupEditDialog
+import com.example.wallpapercarousel.ui.GroupManagerDialog
 import com.example.wallpapercarousel.util.BitmapUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -200,14 +203,26 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     }
     var nextAt by remember { mutableStateOf(Prefs.getNextTriggerAt(ctx)) }
     var lastApplied by remember { mutableStateOf(Prefs.getLastApplied(ctx)) }
-    // 当前正在使用的壁纸文件名（跟随 lastIndex，换序/删除后会重映射）
+    // 当前正在使用的壁纸文件名（按名字记，换序/删删除都不会失效）
     var currentName by remember {
-        mutableStateOf(wallpapers.getOrNull(Prefs.getLastIndex(ctx)))
+        mutableStateOf(
+            Prefs.getLastName(ctx) ?: wallpapers.getOrNull(Prefs.getLastIndex(ctx))
+        )
     }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
     // 正在调整裁剪的壁纸（null 表示未打开预览页）
     var cropTarget by remember { mutableStateOf<String?>(null) }
+    // 编辑态下点缩略图 → 移动到其它壁纸集
+    var movingWallpaper by remember { mutableStateOf<String?>(null) }
     var tipsExpanded by remember { mutableStateOf(false) }
+
+    // ── 壁纸集 ──
+    var groups by remember { mutableStateOf(Prefs.groups(ctx)) }
+    var currentGroupId by remember { mutableStateOf(Prefs.currentGroupId(ctx)) }
+    // 列表当前筛选的组；null = 看全部
+    var viewGroupId by remember { mutableStateOf<String?>(null) }
+    var showGroupManager by remember { mutableStateOf(false) }
+    var editingGroup by remember { mutableStateOf<Prefs.Group?>(null) }
 
     // 长按进入的"抖动编辑态"
     var editing by remember { mutableStateOf(false) }
@@ -236,9 +251,19 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             wallpapers.clear()
             wallpapers.addAll(names)
         }
+        groups = Prefs.groups(ctx)
+        currentGroupId = Prefs.currentGroupId(ctx)
+        if (viewGroupId != null && groups.none { it.id == viewGroupId }) viewGroupId = null
         nextAt = Prefs.getNextTriggerAt(ctx)
         lastApplied = Prefs.getLastApplied(ctx)
-        currentName = wallpapers.getOrNull(Prefs.getLastIndex(ctx))
+        currentName = Prefs.getLastName(ctx)
+    }
+
+    /** 保存分组结构并重排闹钟（规则/顺序变了都可能影响下一次触发） */
+    fun persistGroups(list: List<Prefs.Group>) {
+        Prefs.saveGroups(ctx, list)
+        refresh()
+        RotationScheduler.onSettingsChanged(ctx)
     }
 
     /**
@@ -257,6 +282,53 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         }
     }
 
+    // ── 壁纸集操作 ──
+
+    fun addGroup() {
+        val id = "g_" + System.currentTimeMillis().toString(36)
+        val g = Prefs.Group(id = id, name = "壁纸集 ${groups.size + 1}")
+        Prefs.setCurrentGroupId(ctx, id)
+        viewGroupId = id
+        persistGroups(groups + g)
+    }
+
+    fun updateGroup(g: Prefs.Group) {
+        editingGroup = null
+        persistGroups(groups.map { if (it.id == g.id) g else it })
+    }
+
+    fun moveGroup(g: Prefs.Group, delta: Int) {
+        val idx = groups.indexOfFirst { it.id == g.id }
+        val target = idx + delta
+        if (idx < 0 || target !in groups.indices) return
+        val list = groups.toMutableList()
+        list.removeAt(idx)
+        list.add(target, g)
+        persistGroups(list)
+    }
+
+    fun deleteGroup(g: Prefs.Group) {
+        if (groups.size <= 1) {
+            Toast.makeText(ctx, "至少保留一个壁纸集", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val rest = groups.filter { it.id != g.id }
+        val target = rest.first()
+        // 组里的壁纸不跟着删，整体并入第一个组
+        wallpapers
+            .filter { Prefs.wallpaperGroup(ctx, it) == g.id }
+            .forEach { Prefs.setWallpaperGroup(ctx, it, target.id) }
+        if (Prefs.currentGroupId(ctx) == g.id) Prefs.setCurrentGroupId(ctx, target.id)
+        if (viewGroupId == g.id) viewGroupId = target.id
+        persistGroups(rest)
+    }
+
+    /** 新加的壁纸归到"当前查看的组"，看全部时归到当前播放组 */
+    fun assignToActiveGroup(names: List<String>) {
+        val target = viewGroupId ?: Prefs.currentGroupId(ctx)
+        names.forEach { Prefs.setWallpaperGroup(ctx, it, target) }
+    }
+
     // 消费系统分享进来的图片：复制进壁纸库、刷新列表，然后清空信号避免重复处理
     val incomingShare by sharedUris.collectAsState()
     LaunchedEffect(incomingShare) {
@@ -269,6 +341,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             Toast.makeText(ctx, "添加失败，请重试", Toast.LENGTH_SHORT).show()
         } else {
             Prefs.setWallpaperNames(ctx, Prefs.getWallpaperNames(ctx) + added)
+            assignToActiveGroup(added)
             refresh()
             Toast.makeText(ctx, "已从分享添加 ${added.size} 张壁纸", Toast.LENGTH_SHORT).show()
             if (Prefs.load(ctx).enabled) RotationScheduler.scheduleNext(ctx)
@@ -327,8 +400,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 WallpaperApplier.apply(ctx, WallpaperStore.file(ctx, name), crop)
             }
             if (ok) {
-                val i = wallpapers.indexOf(name)
-                if (i >= 0) Prefs.setLastIndex(ctx, i)
+                Prefs.setLastName(ctx, name)
                 currentName = name
                 lastApplied = Prefs.getLastApplied(ctx)
                 Toast.makeText(ctx, "应用成功", Toast.LENGTH_SHORT).show()
@@ -348,6 +420,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 Toast.makeText(ctx, "添加失败，请重试", Toast.LENGTH_SHORT).show()
             } else {
                 Prefs.setWallpaperNames(ctx, Prefs.getWallpaperNames(ctx) + added)
+                assignToActiveGroup(added)
                 refresh()
                 Toast.makeText(ctx, "已添加 ${added.size} 张壁纸", Toast.LENGTH_SHORT).show()
                 if (Prefs.load(ctx).enabled) RotationScheduler.scheduleNext(ctx)
@@ -484,18 +557,74 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                         }
                     }
 
-                    Text("切换方式", style = MaterialTheme.typography.labelLarge)
+                    Text("播放范围", style = MaterialTheme.typography.labelLarge)
                     SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                         SegmentedButton(
-                            selected = !settings.randomOrder,
-                            onClick = { update(settings.copy(randomOrder = false)) },
+                            selected = !settings.scopeAll,
+                            onClick = { update(settings.copy(scopeAll = false)) },
+                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                        ) { Text("分组播放") }
+                        SegmentedButton(
+                            selected = settings.scopeAll,
+                            onClick = { update(settings.copy(scopeAll = true)) },
+                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                        ) { Text("全部播放") }
+                    }
+
+                    val activeGroup = groups.firstOrNull { it.id == currentGroupId }
+                    Text(
+                        if (settings.scopeAll) {
+                            "切换方式（全部壁纸）"
+                        } else {
+                            "切换方式（当前组：${activeGroup?.name ?: "-"}）"
+                        },
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    val randomNow = if (settings.scopeAll) {
+                        settings.randomOrder
+                    } else {
+                        activeGroup?.mode == Prefs.MODE_RANDOM
+                    }
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        SegmentedButton(
+                            selected = !randomNow,
+                            onClick = {
+                                if (settings.scopeAll) {
+                                    update(settings.copy(randomOrder = false))
+                                } else if (activeGroup != null) {
+                                    updateGroup(activeGroup.copy(mode = Prefs.MODE_SEQUENTIAL))
+                                }
+                            },
                             shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
                         ) { Text("按顺序") }
                         SegmentedButton(
-                            selected = settings.randomOrder,
-                            onClick = { update(settings.copy(randomOrder = true)) },
+                            selected = randomNow,
+                            onClick = {
+                                if (settings.scopeAll) {
+                                    update(settings.copy(randomOrder = true))
+                                } else if (activeGroup != null) {
+                                    updateGroup(activeGroup.copy(mode = Prefs.MODE_RANDOM))
+                                }
+                            },
                             shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
                         ) { Text("随机") }
+                    }
+
+                    if (!settings.scopeAll) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("按规则自动切组", style = MaterialTheme.typography.labelLarge)
+                                Text(
+                                    "工作日/周末、白天/夜晚等，命中规则的组生效；未设置规则时不切换",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = settings.autoSwitch,
+                                onCheckedChange = { update(settings.copy(autoSwitch = it)) }
+                            )
+                        }
                     }
 
                     Button(
@@ -551,24 +680,83 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 }
             }
 
-            // ── 壁纸列表（长按拖拽排序） ──
+            // ── 壁纸列表（壁纸集 + 长按拖拽排序） ──
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "我的壁纸（${wallpapers.size}）",
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f)
                 )
+                TextButton(onClick = { showGroupManager = true }) { Text("管理壁纸集") }
                 if (editing) {
                     TextButton(onClick = { editing = false }) { Text("完成") }
-                } else if (wallpapers.size > 1) {
-                    Text(
-                        "长按排序 · 点击裁剪",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            }
+
+            val groupCounts = groups.associate { g ->
+                g.id to wallpapers.count { Prefs.wallpaperGroup(ctx, it) == g.id }
+            }
+            GroupChips(
+                groups = groups,
+                selectedId = viewGroupId,
+                counts = groupCounts,
+                onSelect = { id ->
+                    viewGroupId = id
+                    // 点组 = 手动切组：同时把当前播放组指过去
+                    if (id != null) {
+                        Prefs.setCurrentGroupId(ctx, id)
+                        currentGroupId = id
+                        // 手动指定了就关掉自动切组，否则下次轮换会被规则切走
+                        if (settings.autoSwitch) {
+                            update(settings.copy(autoSwitch = false))
+                            Toast.makeText(ctx, "已手动切组，自动切组已关闭", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                },
+                onAdd = { addGroup() }
+            )
+
+            if (!editing && wallpapers.size > 1) {
+                Text(
+                    "长按拖拽排序 · 点击缩略图裁剪",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (editing) {
+                Text(
+                    "拖动排序 · 点缩略图可移动到其它壁纸集",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // 当前视图里要显示的壁纸（全部 or 某一组）
+            val visible = remember {
+                mutableStateListOf<String>().apply {
+                    addAll(
+                        if (viewGroupId == null) {
+                            Prefs.getWallpaperNames(ctx)
+                        } else {
+                            Prefs.getWallpaperNames(ctx)
+                                .filter { Prefs.wallpaperGroup(ctx, it) == viewGroupId }
+                        }
                     )
                 }
             }
-            if (wallpapers.isEmpty()) {
+            // 分组/列表变化时同步（拖拽过程中由手势直接改这个列表，不会被覆盖）
+            LaunchedEffect(viewGroupId, wallpapers.toList()) {
+                val next = if (viewGroupId == null) {
+                    wallpapers.toList()
+                } else {
+                    wallpapers.filter { Prefs.wallpaperGroup(ctx, it) == viewGroupId }
+                }
+                if (next != visible.toList()) {
+                    visible.clear()
+                    visible.addAll(next)
+                }
+            }
+
+            if (visible.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -578,7 +766,11 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        "还没有壁纸，点击右下角 + 添加",
+                        if (wallpapers.isEmpty()) {
+                            "还没有壁纸，点击右下角 + 添加"
+                        } else {
+                            "这个壁纸集还是空的，点右下角 + 添加"
+                        },
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -588,18 +780,33 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 val draggingKey = remember { mutableStateOf<String?>(null) }
                 // 被拖项相对其"当前槽位"的位移（换位时做补偿，避免视觉跳变）
                 val dragOffset = remember { mutableStateOf(Offset.Zero) }
-                // 拖拽前"上次播放到的那张"，用于换序后把索引重映射到同一张
-                val dragLastName = remember { mutableStateOf<String?>(null) }
 
-                val commitOrder = {
-                    val key = draggingKey.value
+                /**
+                 * 排序落库：
+                 * - 看"全部"时直接写回全局顺序；
+                 * - 看某一组时，只重排这一组占用的槽位，其它组的相对位置保持不变
+                 *   （组内顺序 = 全局列表里的相对顺序）。
+                 */
+                fun commitOrder() {
                     draggingKey.value = null
                     dragOffset.value = Offset.Zero
-                    if (key != null) {
-                        Prefs.setWallpaperNames(ctx, wallpapers.toList())
-                        val ni = dragLastName.value?.let { wallpapers.indexOf(it) } ?: -1
-                        if (ni >= 0) Prefs.setLastIndex(ctx, ni)
+                    val gid = viewGroupId
+                    if (gid == null) {
+                        wallpapers.clear()
+                        wallpapers.addAll(visible)
+                    } else {
+                        val slots = wallpapers.indices.filter {
+                            Prefs.wallpaperGroup(ctx, wallpapers[it]) == gid
+                        }
+                        if (slots.size == visible.size) {
+                            val newGlobal = wallpapers.toMutableList()
+                            slots.forEachIndexed { i, slot -> newGlobal[slot] = visible[i] }
+                            wallpapers.clear()
+                            wallpapers.addAll(newGlobal)
+                        }
+                        // 槽位数量和可见项对不上（比如正在同步），保持原顺序不动
                     }
+                    Prefs.setWallpaperNames(ctx, wallpapers.toList())
                 }
 
                 LazyVerticalGrid(
@@ -611,17 +818,15 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(260.dp)
-                        .pointerInput(Unit) {
+                        .pointerInput(viewGroupId) {
                             var lastAutoScroll = 0L
                             detectDragGesturesAfterLongPress(
                                 onDragStart = { pos ->
                                     val hit = gridState.layoutInfo.visibleItemsInfo
                                         .firstOrNull { it.hitTest(pos) }
                                     if (hit != null) {
-                                        draggingKey.value = wallpapers.getOrNull(hit.index)
+                                        draggingKey.value = visible.getOrNull(hit.index)
                                         dragOffset.value = Offset.Zero
-                                        dragLastName.value =
-                                            wallpapers.getOrNull(Prefs.getLastIndex(ctx))
                                         editing = true
                                     }
                                 },
@@ -631,15 +836,15 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                                     dragOffset.value += delta
                                     val info = gridState.layoutInfo
                                     val cur = info.visibleItemsInfo.firstOrNull {
-                                        wallpapers.getOrNull(it.index) == key
+                                        visible.getOrNull(it.index) == key
                                     }
                                     val tgt = info.visibleItemsInfo.firstOrNull {
                                         it.hitTest(change.position)
                                     }
                                     // 命中别的格子：就地搬移，其余项自动让位/补位
                                     if (cur != null && tgt != null && cur.index != tgt.index) {
-                                        val moved = wallpapers.removeAt(cur.index)
-                                        wallpapers.add(tgt.index, moved)
+                                        val moved = visible.removeAt(cur.index)
+                                        visible.add(tgt.index, moved)
                                         // 槽位从 cur 换到 tgt，补偿差值让被拖项视觉上留在原位
                                         dragOffset.value += Offset(
                                             (cur.offset.x - tgt.offset.x).toFloat(),
@@ -668,7 +873,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                             )
                         }
                 ) {
-                    items(wallpapers, key = { it }) { name ->
+                    items(visible, key = { it }) { name ->
                         val dragging = draggingKey.value == name
                         WallpaperItem(
                             name = name,
@@ -683,6 +888,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                             dragOffsetState = dragOffset,
                             onUse = { useWallpaper(name) },
                             onPreview = { cropTarget = name },
+                            onMoveRequest = { movingWallpaper = name },
                             isCurrent = name == currentName,
                             onDelete = { pendingDelete = name }
                         )
@@ -716,15 +922,13 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             text = { Text("确定要删除这张壁纸吗？") },
             confirmButton = {
                 TextButton(onClick = {
-                    // 先记住"上次播放到的那张"，删除后把索引重映射到同一张
-                    val lastName = wallpapers.getOrNull(Prefs.getLastIndex(ctx))
                     WallpaperStore.remove(ctx, name)
                     Prefs.clearCrop(ctx, name)
+                    Prefs.clearWallpaperGroup(ctx, name)
                     WallpaperCache.remove(ctx, name)
+                    if (Prefs.getLastName(ctx) == name) Prefs.clearLastName(ctx)
                     wallpapers.remove(name)
                     Prefs.setWallpaperNames(ctx, wallpapers.toList())
-                    val ni = lastName?.let { wallpapers.indexOf(it) } ?: -1
-                    Prefs.setLastIndex(ctx, ni)
                     pendingDelete = null
                     refresh()
                     if (settings.enabled) RotationScheduler.scheduleNext(ctx)
@@ -733,6 +937,67 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("取消") }
             }
+        )
+    }
+
+    // ── 把某张壁纸移到其它壁纸集 ──
+    movingWallpaper?.let { name ->
+        val owner = Prefs.wallpaperGroup(ctx, name)
+        AlertDialog(
+            onDismissRequest = { movingWallpaper = null },
+            title = { Text("移动到壁纸集") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    groups.forEach { g ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    Prefs.setWallpaperGroup(ctx, name, g.id)
+                                    movingWallpaper = null
+                                    refresh()
+                                    Toast.makeText(ctx, "已移到「${g.name}」", Toast.LENGTH_SHORT).show()
+                                }
+                                .padding(vertical = 12.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(g.name, modifier = Modifier.weight(1f))
+                            if (g.id == owner) {
+                                Text(
+                                    "当前",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { movingWallpaper = null }) { Text("取消") }
+            }
+        )
+    }
+
+    // ── 壁纸集管理 ──
+    if (showGroupManager) {
+        GroupManagerDialog(
+            groups = groups,
+            onDismiss = { showGroupManager = false },
+            onEdit = { g ->
+                showGroupManager = false
+                editingGroup = g
+            },
+            onMove = { g, delta -> moveGroup(g, delta) },
+            onDelete = { g -> deleteGroup(g) }
+        )
+    }
+
+    editingGroup?.let { g ->
+        GroupEditDialog(
+            group = g,
+            onDismiss = { editingGroup = null },
+            onConfirm = { updated -> updateGroup(updated) }
         )
     }
 }
@@ -747,6 +1012,7 @@ fun WallpaperItem(
     dragOffsetState: State<Offset>,
     onUse: () -> Unit,
     onPreview: () -> Unit,
+    onMoveRequest: () -> Unit,
     isCurrent: Boolean,
     onDelete: () -> Unit
 ) {
@@ -773,8 +1039,11 @@ fun WallpaperItem(
                 }
             }
             .clip(RoundedCornerShape(12.dp))
-            // 点击缩略图进入裁剪预览；编辑态下不响应，避免长按拖拽松手时误开预览
-            .clickable { if (!editState.value) onPreview() }
+            // 普通态点开裁剪预览；编辑态点开"移动到其它壁纸集"，
+            // 同时避免长按拖拽松手时误触
+            .clickable {
+                if (editState.value) onMoveRequest() else onPreview()
+            }
     ) {
         val bitmap by produceState<Bitmap?>(initialValue = null, key1 = name) {
             value = withContext(Dispatchers.IO) {
