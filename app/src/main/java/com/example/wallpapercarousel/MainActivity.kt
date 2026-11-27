@@ -92,6 +92,7 @@ import com.example.wallpapercarousel.data.Prefs
 import com.example.wallpapercarousel.data.WallpaperStore
 import com.example.wallpapercarousel.logic.RotationScheduler
 import com.example.wallpapercarousel.logic.WallpaperApplier
+import com.example.wallpapercarousel.logic.WallpaperCache
 import com.example.wallpapercarousel.util.BitmapUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -240,6 +241,22 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         currentName = wallpapers.getOrNull(Prefs.getLastIndex(ctx))
     }
 
+    /**
+     * 预生成成品图：把新加的壁纸先渲染成"正好等于屏幕分辨率"的 JPEG 缓存，
+     * 第一次轮到它时就能直接 setStream，不必现场解大图。
+     * 失败不影响正常使用（轮换时会自动重试），所以这里静默处理。
+     */
+    fun prewarm(names: List<String>) {
+        if (names.isEmpty()) return
+        scope.launch(Dispatchers.IO) {
+            names.forEach { n ->
+                runCatching {
+                    WallpaperCache.ensure(ctx, WallpaperStore.file(ctx, n), Prefs.getCrop(ctx, n))
+                }
+            }
+        }
+    }
+
     // 消费系统分享进来的图片：复制进壁纸库、刷新列表，然后清空信号避免重复处理
     val incomingShare by sharedUris.collectAsState()
     LaunchedEffect(incomingShare) {
@@ -255,6 +272,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             refresh()
             Toast.makeText(ctx, "已从分享添加 ${added.size} 张壁纸", Toast.LENGTH_SHORT).show()
             if (Prefs.load(ctx).enabled) RotationScheduler.scheduleNext(ctx)
+            prewarm(added)
         }
     }
 
@@ -266,6 +284,13 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    // 启动时清理源头已不存在的成品图缓存（以及上次写入中断留下的临时文件）
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            runCatching { WallpaperCache.pruneOrphans(ctx) }
+        }
     }
 
     fun update(s: Prefs.Settings) {
@@ -326,6 +351,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 refresh()
                 Toast.makeText(ctx, "已添加 ${added.size} 张壁纸", Toast.LENGTH_SHORT).show()
                 if (Prefs.load(ctx).enabled) RotationScheduler.scheduleNext(ctx)
+                prewarm(added)
             }
         }
     }
@@ -694,6 +720,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                     val lastName = wallpapers.getOrNull(Prefs.getLastIndex(ctx))
                     WallpaperStore.remove(ctx, name)
                     Prefs.clearCrop(ctx, name)
+                    WallpaperCache.remove(ctx, name)
                     wallpapers.remove(name)
                     Prefs.setWallpaperNames(ctx, wallpapers.toList())
                     val ni = lastName?.let { wallpapers.indexOf(it) } ?: -1

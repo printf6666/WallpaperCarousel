@@ -18,7 +18,7 @@ android {
         // ── 真实语义化版本号（不再用日期）──
         // 发版时只改这三个数字：功能更新动 minor，修 bug 动 patch（一天发多次也能正确递增）
         val appMajor = 1
-        val appMinor = 7
+        val appMinor = 8
         val appPatch = 1
         versionName = "$appMajor.$appMinor.$appPatch"
 
@@ -36,9 +36,33 @@ android {
         }
     }
 
+    /**
+     * 固定签名。
+     *
+     * 以前两个 buildType 都吃默认的 debug 签名（~/.android/debug.keystore），
+     * 那把钥匙是「构建环境首次构建时随机生成」的：换个机器、换个用户目录、
+     * 甚至重装构建环境，钥匙就换了一把，手机上的旧版本就会被判签名冲突、无法覆盖安装。
+     *
+     * 现在签名文件随工程走：debug / release 都用 keystore/wallpaper.jks，
+     * 任何机器、任何会话打出来的包签名都一致，可长期覆盖升级。
+     * 口令是个人项目用途，直接写在这里方便换机重建；请勿把本工程当作公开仓库发布。
+     */
+    signingConfigs {
+        create("app") {
+            storeFile = rootProject.file("keystore/wallpaper.jks")
+            storePassword = "wallpaper123"
+            keyAlias = "wallpaper"
+            keyPassword = "wallpaper123"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("app")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("app")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

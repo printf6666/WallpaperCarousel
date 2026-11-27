@@ -31,10 +31,13 @@ object BitmapUtil {
         BitmapFactory.decodeFile(file.absolutePath, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
-        // 采样到"刚好不小于目标尺寸"，兼顾清晰度与内存
+        // 先按目标宽高比算出真正会用到的裁剪区域，再按"裁剪区域"决定采样率。
+        // 之前按整图宽高判断：遇到超长图（如 8000×1000 全景）第二维早早不满足条件，
+        // 采样会退化成 1，整图解码进内存 —— 既慢又容易 OOM。
+        val cropRect = sourceRect(bounds.outWidth, bounds.outHeight, targetW, targetH, crop)
         var sample = 1
-        while (bounds.outWidth / (sample * 2) >= targetW &&
-            bounds.outHeight / (sample * 2) >= targetH
+        while (cropRect.width() / (sample * 2) >= targetW &&
+            cropRect.height() / (sample * 2) >= targetH
         ) {
             sample *= 2
         }
@@ -47,7 +50,8 @@ object BitmapUtil {
                     file.absolutePath,
                     BitmapFactory.Options().apply {
                         inSampleSize = s
-                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                        // 壁纸不需要透明通道，RGB_565 省一半内存
+                        inPreferredConfig = Bitmap.Config.RGB_565
                     }
                 )
             } catch (e: OutOfMemoryError) {
@@ -58,26 +62,10 @@ object BitmapUtil {
         val src = decoded ?: return null
 
         try {
-            val srcAspect = src.width.toDouble() / src.height
-            val tgtAspect = targetW.toDouble() / targetH
+            // 解码后的实际尺寸可能与 bounds/sample 略有出入，按解码后的尺寸再算一次
+            val srcRect = sourceRect(src.width, src.height, targetW, targetH, crop)
 
-            val srcRect: Rect
-            if (crop != null) {
-                // 用户手动选定的裁剪区域，按目标宽高比做一次校正后使用
-                srcRect = normalizeCrop(crop, src.width, src.height, tgtAspect)
-            } else if (srcAspect > tgtAspect) {
-                // 图片相对更宽：左右居中裁剪（如 1680x2160 → 屏 1080x2160 时取 [300,0]-[1380,2160]）
-                val cropW = (src.height * tgtAspect).toInt().coerceIn(1, src.width)
-                val left = (src.width - cropW) / 2
-                srcRect = Rect(left, 0, left + cropW, src.height)
-            } else {
-                // 图片相对更高：上下居中裁剪
-                val cropH = (src.width / tgtAspect).toInt().coerceIn(1, src.height)
-                val top = (src.height - cropH) / 2
-                srcRect = Rect(0, top, src.width, top + cropH)
-            }
-
-            val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+            val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.RGB_565)
             Canvas(out).drawBitmap(
                 src,
                 srcRect,
@@ -89,6 +77,39 @@ object BitmapUtil {
             return null
         } finally {
             src.recycle()
+        }
+    }
+
+    /**
+     * 按目标宽高比，算出源图上需要使用的像素矩形：
+     * 有手动裁剪就用裁剪区域（并按比例校正），否则居中 cover 裁剪。
+     */
+    private fun sourceRect(
+        w: Int,
+        h: Int,
+        targetW: Int,
+        targetH: Int,
+        crop: RectF?
+    ): Rect {
+        val tgtAspect = targetW.toDouble() / targetH
+        if (w <= 0 || h <= 0) return Rect(0, 0, 1, 1)
+
+        if (crop != null) {
+            // 用户手动选定的裁剪区域，按目标宽高比做一次校正后使用
+            return normalizeCrop(crop, w, h, tgtAspect)
+        }
+
+        val srcAspect = w.toDouble() / h
+        return if (srcAspect > tgtAspect) {
+            // 图片相对更宽：左右居中裁剪（如 1680x2160 → 屏 1080x2160 时取 [300,0]-[1380,2160]）
+            val cropW = (h * tgtAspect).toInt().coerceIn(1, w)
+            val left = (w - cropW) / 2
+            Rect(left, 0, left + cropW, h)
+        } else {
+            // 图片相对更高：上下居中裁剪
+            val cropH = (w / tgtAspect).toInt().coerceIn(1, h)
+            val top = (h - cropH) / 2
+            Rect(0, top, w, top + cropH)
         }
     }
 

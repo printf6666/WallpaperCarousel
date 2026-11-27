@@ -19,9 +19,14 @@
 
 ## 安装
 
-直接安装 `app/build/outputs/apk/debug/app-debug-v<版本号>.apk`（例如 `app-debug-v1.4.apk`，调试签名，可覆盖安装升级）。
+直接安装 `app/build/outputs/apk/debug/app-debug-v<版本号>.apk`（工程固定签名，可长期覆盖安装升级）。
 
 > 安装时若提示「禁止安装未知来源应用」，按提示允许本浏览器/文件管理器安装应用即可。
+>
+> **一次性例外**：v1.8.0 之前的包用的是「运行环境自动生成的 debug 密钥」，环境一变钥匙就换，
+> 会和手机上已装的旧版签名冲突（提示 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。
+> 从旧版升到 v1.8.1 需先卸载旧版一次（壁纸列表与裁剪设置会清空，相册里的原图不受影响），
+> 之后所有版本都使用工程内的 `keystore/wallpaper.jks`，不会再冲突。
 
 ## 首次使用（重要，ColorOS 请务必做第 1~3 步）
 
@@ -45,6 +50,7 @@
 
 - Kotlin + Jetpack Compose（Material 3），minSdk 29 / targetSdk 35
 - 换壁纸：`WallpaperManager.setBitmap()`（FLAG_SYSTEM，仅桌面），**无需 root**
+- 性能：添加/裁剪时把成品图预渲染到 `filesDir/applied/`（文件名带「渲染版本 + 屏幕尺寸 + 源图长度/修改时间 + 裁剪区域」签名，任一项变化自动失效），换壁纸走 `setStream` 直接从文件流解码，不在进程内持有全屏大图；解码用 RGB_565，采样率按实际裁剪区域计算（避免超长图退化成整图解码）
 - 定时：`AlarmManager.setExactAndAllowWhileIdle()` 逐次续排（无精确闹钟权限自动降级）
 - 壁纸尺寸：严格等于屏幕分辨率（自然方向，与当前旋转无关），系统端 scale 恒为 1（不会放大数倍/靠左）。**注意**：不能用 `WallpaperManager.getDesiredMinimumWidth()`，ColorOS 会返回约 2 倍屏宽，按它出图会导致画面被居中裁剪放大一倍
 - 图片复制到应用私有目录 `filesDir/wallpapers/`，列表顺序存于 SharedPreferences

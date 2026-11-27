@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.RectF
 import android.hardware.display.DisplayManager
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
@@ -12,6 +13,7 @@ import com.example.wallpapercarousel.data.Prefs
 import com.example.wallpapercarousel.data.WallpaperStore
 import com.example.wallpapercarousel.util.BitmapUtil
 import java.io.File
+import java.io.FileInputStream
 import kotlin.random.Random
 
 /**
@@ -60,11 +62,40 @@ object WallpaperApplier {
      * 做法：自行把图片按屏幕比例居中裁剪并缩放到"正好等于屏幕分辨率"，
      * 再以空裁剪提示交给系统。位图与屏幕 1:1，系统没有缩放空间，
      * 桌面渲染时 scale 恒为 1，不会出现放大数倍或靠左显示的问题。
+     *
+     * 性能：优先使用预渲染好的成品图（见 [WallpaperCache]），以文件流形式交给系统，
+     * 本进程不再解大图；缓存不可用时才回退到内存位图路径，并在成功后补一份缓存。
      */
     fun apply(context: Context, file: File, crop: RectF? = null): Boolean = synchronized(applyLock) {
         val wm = WallpaperManager.getInstance(context)
         val target = targetSize(context)
+        val started = SystemClock.elapsedRealtime()
 
+        // ① 快路径：预生成成品图 → setStream
+        val cached = try {
+            WallpaperCache.ensure(context, file, crop)
+        } catch (t: Throwable) {
+            Log.w(TAG, "prepare cache failed", t)
+            null
+        }
+        if (cached != null) {
+            try {
+                FileInputStream(cached).use { ins ->
+                    wm.setStream(ins, null, true, WallpaperManager.FLAG_SYSTEM)
+                }
+                recordApplied(
+                    context, wm, target,
+                    "cache ${SystemClock.elapsedRealtime() - started}ms ${cached.length() / 1024}KB"
+                )
+                return@synchronized true
+            } catch (t: Throwable) {
+                Log.w(TAG, "setStream failed, fallback to bitmap", t)
+                // 文件可能损坏或被系统判为不可用，删掉让下次重新生成
+                cached.delete()
+            }
+        }
+
+        // ② 兜底：内存位图路径（原实现）
         var attempt = 0
         while (attempt < 2) {
             attempt++
@@ -77,23 +108,16 @@ object WallpaperApplier {
 
             try {
                 wm.setBitmap(bmp, null, true, WallpaperManager.FLAG_SYSTEM)
-                val applied = "${bmp.width}×${bmp.height}"
-                // 读回系统实际存储的尺寸：不一致说明该 ROM 又做了二次裁剪/缩放
-                val stored = storedWallpaperSize(wm)
-                val storedText = stored?.let { "${it[0]}×${it[1]}" }
-                Log.i(
-                    TAG,
-                    "applied=$applied screen=${target[0]}x${target[1]} stored=$storedText " +
-                        "desired=${wm.desiredMinimumWidth}x${wm.desiredMinimumHeight}"
+                recordApplied(
+                    context, wm, target,
+                    "bitmap ${SystemClock.elapsedRealtime() - started}ms"
                 )
-                Prefs.setLastApplied(
-                    context,
-                    when {
-                        storedText == null -> "$applied（屏幕 ${target[0]}×${target[1]}）"
-                        storedText == applied -> "$applied ✓"
-                        else -> "$applied → 系统存储 $storedText ⚠"
-                    }
-                )
+                // 顺手把这张位图存成缓存，下一次就能走快路径
+                try {
+                    WallpaperCache.saveFromBitmap(context, file, crop, bmp)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "save cache after bitmap apply failed", t)
+                }
                 return@synchronized true
             } catch (t: Throwable) {
                 Log.e(TAG, "set wallpaper failed (attempt $attempt)", t)
@@ -109,6 +133,27 @@ object WallpaperApplier {
             }
         }
         false
+    }
+
+    /** 记录本次应用的尺寸、耗时与系统回读结果（用于排查 ROM 二次裁剪） */
+    private fun recordApplied(context: Context, wm: WallpaperManager, target: IntArray, via: String) {
+        val applied = "${target[0]}×${target[1]}"
+        // 读回系统实际存储的尺寸：不一致说明该 ROM 又做了二次裁剪/缩放
+        val stored = storedWallpaperSize(wm)
+        val storedText = stored?.let { "${it[0]}×${it[1]}" }
+        Log.i(
+            TAG,
+            "applied=$applied via=$via stored=$storedText " +
+                "desired=${wm.desiredMinimumWidth}x${wm.desiredMinimumHeight}"
+        )
+        Prefs.setLastApplied(
+            context,
+            when {
+                storedText == null -> "$applied（屏幕 ${target[0]}×${target[1]}）"
+                storedText == applied -> "$applied ✓"
+                else -> "$applied → 系统存储 $storedText ⚠"
+            }
+        )
     }
 
     /**
