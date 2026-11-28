@@ -77,9 +77,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -91,11 +93,11 @@ import com.example.wallpapercarousel.logic.WallpaperApplier
 import com.example.wallpapercarousel.logic.WallpaperCache
 import com.example.wallpapercarousel.ui.GroupCard
 import com.example.wallpapercarousel.ui.GroupEditDialog
-import com.example.wallpapercarousel.ui.GroupManagerDialog
 import com.example.wallpapercarousel.ui.GroupSortPage
 import com.example.wallpapercarousel.util.BitmapUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -103,19 +105,27 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInParent
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.zIndex
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -211,8 +221,48 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     // ── 壁纸集 ──
     var groups by remember { mutableStateOf(Prefs.groups(ctx)) }
     var currentGroupId by remember { mutableStateOf(Prefs.currentGroupId(ctx)) }
-    var showGroupManager by remember { mutableStateOf(false) }
     var editingGroup by remember { mutableStateOf<Prefs.Group?>(null) }
+    var pendingDeleteGroup by remember { mutableStateOf<Prefs.Group?>(null) }
+
+    // 长按拖动排序壁纸集：拖拽期间用的临时顺序 + 每张卡片的纵向位置（相对这个 Column）
+    val displayGroups = remember { mutableStateListOf<Prefs.Group>().apply { addAll(groups) } }
+    val groupBounds = remember { mutableStateMapOf<String, Rect>() }
+    var draggingGroupId by remember { mutableStateOf<String?>(null) }
+    var groupDragOffset by remember { mutableStateOf(0f) }
+    // 拖到屏幕上下边缘时自动滚动整页，否则壁纸集一多就拖不到看不见的位置
+    val pageScroll = rememberScrollState()
+    var groupsColumnTop by remember { mutableStateOf(0f) }
+    var dragPointerY by remember { mutableStateOf(0f) }
+    val density = LocalDensity.current
+    val dragEdgePx = with(density) { 90.dp.toPx() }
+    val screenHeightPx = with(density) {
+        LocalConfiguration.current.screenHeightDp.dp.toPx()
+    }
+
+    // 分组结构变化（新建/删除/改名）时同步到临时列表；拖拽过程中不覆盖，否则会打断排序
+    LaunchedEffect(groups) {
+        if (draggingGroupId == null && displayGroups.toList() != groups) {
+            displayGroups.clear()
+            displayGroups.addAll(groups)
+        }
+    }
+
+    // 拖动壁纸集时，手指贴近屏幕上下边缘就滚动整页（滚动会让槽位整体位移，需补偿拖拽偏移）
+    LaunchedEffect(draggingGroupId) {
+        if (draggingGroupId == null) return@LaunchedEffect
+        while (isActive) {
+            val dy = when {
+                dragPointerY < dragEdgePx -> -14f
+                dragPointerY > screenHeightPx - dragEdgePx -> 14f
+                else -> 0f
+            }
+            if (dy != 0f) {
+                val consumed = pageScroll.scrollBy(dy)
+                if (consumed != 0f) groupDragOffset += consumed
+            }
+            delay(16)
+        }
+    }
 
     /**
      * 重新读取两项系统权限。
@@ -292,14 +342,12 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         persistGroups(groups.map { if (it.id == g.id) g else it })
     }
 
-    fun moveGroup(g: Prefs.Group, delta: Int) {
-        val idx = groups.indexOfFirst { it.id == g.id }
-        val target = idx + delta
-        if (idx < 0 || target !in groups.indices) return
-        val list = groups.toMutableList()
-        list.removeAt(idx)
-        list.add(target, g)
-        persistGroups(list)
+    /** 长按拖动排序壁纸集落库 */
+    fun commitGroupOrder() {
+        draggingGroupId = null
+        groupDragOffset = 0f
+        val ordered = displayGroups.toList()
+        if (ordered.map { it.id } != groups.map { it.id }) persistGroups(ordered)
     }
 
     fun deleteGroup(g: Prefs.Group) {
@@ -551,7 +599,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(pageScroll)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -705,7 +753,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 }
             }
 
-            // ── 我的壁纸：每个壁纸集一张卡片，缩略图自由横滑 ──
+            // ── 我的壁纸：每个壁纸集一张卡片，缩略图自由横滑；长按卡片可拖动调整壁纸集顺序 ──
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "我的壁纸（${wallpapers.size}）",
@@ -713,24 +761,96 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                     modifier = Modifier.weight(1f)
                 )
                 TextButton(onClick = { addGroup() }) { Text("新建壁纸集") }
-                TextButton(onClick = { showGroupManager = true }) { Text("管理") }
+            }
+            if (displayGroups.size > 1) {
+                Text(
+                    "长按壁纸集可拖动排序",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                groups.forEach { g ->
-                    key(g.id) {
-                        val items = wallpapers.filter { Prefs.wallpaperGroup(ctx, it) == g.id }
-                        GroupCard(
-                            group = g,
-                            items = items,
-                            isActive = g.id == currentGroupId,
-                            currentName = currentName,
-                            onApply = { applyGroup(g) },
-                            onSort = { sortingGroupId = g.id },
-                            onUse = { useWallpaper(it) },
-                            onPreview = { cropTarget = it },
-                            onDelete = { pendingDelete = it }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onGloballyPositioned { groupsColumnTop = it.positionInRoot().y }
+                    .pointerInput(Unit) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { pos ->
+                                val hit = displayGroups.firstOrNull { g ->
+                                    groupBounds[g.id]?.contains(pos) == true
+                                }
+                                if (hit != null) {
+                                    draggingGroupId = hit.id
+                                    groupDragOffset = 0f
+                                    dragPointerY = groupsColumnTop + pos.y
+                                }
+                            },
+                            onDrag = { change, delta ->
+                                val id = draggingGroupId
+                                    ?: return@detectDragGesturesAfterLongPress
+                                change.consume()
+                                groupDragOffset += delta.y
+                                dragPointerY = groupsColumnTop + change.position.y
+
+                                val fromRect = groupBounds[id]
+                                    ?: return@detectDragGesturesAfterLongPress
+                                // 被拖卡片当前的视觉中心落在哪张卡片上，就换到它的位置
+                                val centerY = fromRect.center.y + groupDragOffset
+                                val target = displayGroups.firstOrNull { g ->
+                                    g.id != id && groupBounds[g.id]?.let { r ->
+                                        centerY >= r.top && centerY <= r.bottom
+                                    } == true
+                                } ?: return@detectDragGesturesAfterLongPress
+
+                                val from = displayGroups.indexOfFirst { it.id == id }
+                                val to = displayGroups.indexOfFirst { it.id == target.id }
+                                val toTop = groupBounds[target.id]?.top
+                                if (from < 0 || to < 0 || from == to || toTop == null) {
+                                    return@detectDragGesturesAfterLongPress
+                                }
+                                val moved = displayGroups[from]
+                                displayGroups.removeAt(from)
+                                displayGroups.add(to, moved)
+                                // 槽位从 fromRect 换到 target 的位置，补偿差值让被拖卡片继续跟手
+                                groupDragOffset += fromRect.top - toTop
+                            },
+                            onDragEnd = { commitGroupOrder() },
+                            onDragCancel = { commitGroupOrder() }
                         )
+                    },
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                displayGroups.forEach { g ->
+                    key(g.id) {
+                        val dragging = draggingGroupId == g.id
+                        val items = wallpapers.filter { Prefs.wallpaperGroup(ctx, it) == g.id }
+                        // 外面这层只负责测量槽位位置：里面那层做拖拽位移，测量结果不受影响
+                        Box(
+                            modifier = Modifier
+                                .zIndex(if (dragging) 1f else 0f)
+                                .onGloballyPositioned { groupBounds[g.id] = it.boundsInParent() }
+                        ) {
+                            GroupCard(
+                                group = g,
+                                items = items,
+                                isActive = g.id == currentGroupId,
+                                currentName = currentName,
+                                modifier = Modifier.graphicsLayer {
+                                    if (dragging) {
+                                        translationY = groupDragOffset
+                                        scaleX = 1.02f
+                                        scaleY = 1.02f
+                                    }
+                                },
+                                onApply = { applyGroup(g) },
+                                onSort = { sortingGroupId = g.id },
+                                onSettings = { editingGroup = g },
+                                onUse = { useWallpaper(it) },
+                                onPreview = { cropTarget = it },
+                                onDelete = { pendingDelete = it }
+                            )
+                        }
                     }
                 }
             }
@@ -832,25 +952,41 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         )
     }
 
-    // ── 壁纸集管理 ──
-    if (showGroupManager) {
-        GroupManagerDialog(
-            groups = groups,
-            onDismiss = { showGroupManager = false },
-            onEdit = { g ->
-                showGroupManager = false
-                editingGroup = g
-            },
-            onMove = { g, delta -> moveGroup(g, delta) },
-            onDelete = { g -> deleteGroup(g) }
-        )
-    }
-
+    // ── 编辑壁纸集（卡片右上角设置按钮）──
     editingGroup?.let { g ->
         GroupEditDialog(
             group = g,
+            canDelete = groups.size > 1,
             onDismiss = { editingGroup = null },
+            onDelete = {
+                editingGroup = null
+                pendingDeleteGroup = g
+            },
             onConfirm = { updated -> updateGroup(updated) }
+        )
+    }
+
+    // 删除壁纸集确认
+    pendingDeleteGroup?.let { g ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteGroup = null },
+            title = { Text("删除壁纸集") },
+            text = {
+                Text(
+                    "确定删除「${g.name}」？\n组里的壁纸不会丢，会并入第一个壁纸集。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDeleteGroup = null
+                    deleteGroup(g)
+                }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteGroup = null }) { Text("取消") }
+            }
         )
     }
 }
