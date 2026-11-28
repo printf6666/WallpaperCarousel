@@ -95,6 +95,7 @@ import com.example.wallpapercarousel.ui.GroupManagerDialog
 import com.example.wallpapercarousel.ui.GroupSortPage
 import com.example.wallpapercarousel.util.BitmapUtil
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -201,11 +202,41 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     var movingWallpaper by remember { mutableStateOf<String?>(null) }
     var tipsExpanded by remember { mutableStateOf(false) }
 
+    // 系统权限状态：必须是 State，否则从系统设置页返回后不会触发重组，界面一直停在旧状态
+    var canExact by remember { mutableStateOf(RotationScheduler.canScheduleExact(ctx)) }
+    var ignoringBattery by remember { mutableStateOf(isIgnoringBatteryOpt(ctx)) }
+    // 每次回到前台 +1，驱动下面的一次性补查（部分 ROM 权限状态更新有延迟）
+    var resumeTick by remember { mutableStateOf(0) }
+
     // ── 壁纸集 ──
     var groups by remember { mutableStateOf(Prefs.groups(ctx)) }
     var currentGroupId by remember { mutableStateOf(Prefs.currentGroupId(ctx)) }
     var showGroupManager by remember { mutableStateOf(false) }
     var editingGroup by remember { mutableStateOf<Prefs.Group?>(null) }
+
+    /**
+     * 重新读取两项系统权限。
+     *
+     * [notify] = true 时，状态由"未授权"变成"已授权"会弹一句提示，并顺手把闹钟
+     * 重排成精确闹钟（之前降级成 setAndAllowWhileIdle 的那次要换掉）。
+     */
+    fun refreshPermissions(notify: Boolean = false) {
+        val exact = RotationScheduler.canScheduleExact(ctx)
+        if (exact != canExact) {
+            canExact = exact
+            if (exact && notify) {
+                Toast.makeText(ctx, "精确闹钟已授权", Toast.LENGTH_SHORT).show()
+                if (Prefs.load(ctx).enabled) RotationScheduler.scheduleNext(ctx)
+            }
+        }
+        val battery = isIgnoringBatteryOpt(ctx)
+        if (battery != ignoringBattery) {
+            ignoringBattery = battery
+            if (battery && notify) {
+                Toast.makeText(ctx, "已加入电池优化白名单", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     fun refresh() {
         settings = Prefs.load(ctx)
@@ -219,6 +250,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         nextAt = Prefs.getNextTriggerAt(ctx)
         lastApplied = Prefs.getLastApplied(ctx)
         currentName = Prefs.getLastName(ctx)
+        refreshPermissions()
     }
 
     /** 保存分组结构并重排闹钟（规则/顺序变了都可能影响下一次触发） */
@@ -324,14 +356,29 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         }
     }
 
-    // 回到前台时刷新状态（下次更换时间等）
+    // 回到前台时刷新状态（下次更换时间、权限状态等）
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val obs = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) refresh()
+            if (event == Lifecycle.Event.ON_RESUME) {
+                // 先带提示地查一次：刚从权限页返回，能立刻把"未授权"改成"已授权"
+                refreshPermissions(notify = true)
+                refresh()
+                resumeTick++
+            }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    // 从系统设置页返回后补查几次：部分 ROM 的权限 app-op 有几百毫秒延迟，
+    // 只查一次会出现"明明点了允许、界面还写着未授权"，必须再进一次才变
+    LaunchedEffect(resumeTick) {
+        if (resumeTick == 0) return@LaunchedEffect
+        repeat(4) {
+            delay(400)
+            refreshPermissions(notify = true)
+        }
     }
 
     // 启动时清理源头已不存在的成品图缓存（以及上次写入中断留下的临时文件）
@@ -459,9 +506,6 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     }
 
     val fmt = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
-    val canExact = RotationScheduler.canScheduleExact(ctx)
-    val powerManager = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
-    val ignoringBattery = powerManager.isIgnoringBatteryOptimizations(ctx.packageName)
 
     val presets = remember {
         listOf(
@@ -1065,6 +1109,14 @@ fun CropDialog(
             }
         }
     }
+}
+
+/** 是否已在系统电池优化白名单里（拿不到 PowerManager 时按"受限制"处理） */
+private fun isIgnoringBatteryOpt(context: Context): Boolean = try {
+    val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    pm?.isIgnoringBatteryOptimizations(context.packageName) ?: false
+} catch (t: Throwable) {
+    false
 }
 
 @Composable
