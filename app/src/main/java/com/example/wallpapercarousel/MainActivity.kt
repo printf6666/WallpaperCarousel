@@ -81,6 +81,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -762,13 +763,19 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 )
                 TextButton(onClick = { addGroup() }) { Text("新建壁纸集") }
             }
-            if (displayGroups.size > 1) {
-                Text(
-                    "长按壁纸集可拖动排序 · 壁纸集可左右滑动 · 点击壁纸可编辑",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            // 一行放得下：用 labelSmall（11sp）比正文小一号，避免被系统字体缩放挤成两行
+            // 只有一个壁纸集时没有"排序"可言，提示里就不带长按排序那一段
+            Text(
+                if (displayGroups.size > 1) {
+                    "长按壁纸集可排序 · 壁纸集可左右滑动 · 点击壁纸可编辑"
+                } else {
+                    "壁纸集可左右滑动 · 点击壁纸可编辑"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
 
             Column(
                 modifier = Modifier
