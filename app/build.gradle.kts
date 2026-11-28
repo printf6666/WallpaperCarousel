@@ -19,7 +19,7 @@ android {
         // 发版时只改这三个数字：功能更新动 minor，修 bug 动 patch（一天发多次也能正确递增）
         val appMajor = 1
         val appMinor = 11
-        val appPatch = 0
+        val appPatch = 1
         versionName = "$appMajor.$appMinor.$appPatch"
 
         // versionCode 只用于系统判断"能否覆盖安装"，单调递增即可，用户看不到。

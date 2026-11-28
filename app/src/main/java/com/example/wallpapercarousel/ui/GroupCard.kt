@@ -84,12 +84,6 @@ fun GroupCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Text(
-                        "左右自由滑动 · 点击编辑",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
                 }
                 // 「应用」→ 该组成为当前播放的组；已是当前组时显示「应用中」并停用点击
                 Button(

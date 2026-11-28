@@ -764,7 +764,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             }
             if (displayGroups.size > 1) {
                 Text(
-                    "长按壁纸集可拖动排序",
+                    "长按壁纸集可拖动排序 · 壁纸集可左右滑动 · 点击壁纸可编辑",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
