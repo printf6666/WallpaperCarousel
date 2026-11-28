@@ -52,9 +52,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -667,37 +664,8 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                         }
                     }
 
-                    val activeGroup = groups.firstOrNull { it.id == currentGroupId }
-                    Text(
-                        "切换方式（当前应用：${activeGroup?.name ?: "-"}）",
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                    val randomNow = activeGroup?.mode == Prefs.MODE_RANDOM
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        SegmentedButton(
-                            selected = !randomNow,
-                            onClick = {
-                                if (activeGroup != null) {
-                                    updateGroup(activeGroup.copy(mode = Prefs.MODE_SEQUENTIAL))
-                                }
-                            },
-                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
-                        ) { Text("组内顺序") }
-                        SegmentedButton(
-                            selected = randomNow,
-                            onClick = {
-                                if (activeGroup != null) {
-                                    updateGroup(activeGroup.copy(mode = Prefs.MODE_RANDOM))
-                                }
-                            },
-                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
-                        ) { Text("组内随机") }
-                    }
-                    Text(
-                        "只对当前应用的壁纸集生效，其它组各自保留自己的设置",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // 切换方式（组内顺序 / 组内随机）只在壁纸集卡片的「设置」里改，
+                    // 主界面不再提供入口，避免同一个设置有两个地方可改。
 
                     // 不常用项收进折叠区，默认只留一行，免得首屏太长看不到壁纸卡片
                     TextButton(onClick = { advancedExpanded = !advancedExpanded }) {
