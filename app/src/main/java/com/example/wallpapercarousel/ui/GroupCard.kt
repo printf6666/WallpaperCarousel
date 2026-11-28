@@ -1,6 +1,8 @@
 package com.example.wallpapercarousel.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
@@ -29,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -52,6 +56,7 @@ fun GroupCard(
     currentName: String?,
     modifier: Modifier = Modifier,
     onApply: () -> Unit,
+    onAddHere: () -> Unit,
     onSort: () -> Unit,
     onSettings: () -> Unit,
     onUse: (String) -> Unit,
@@ -111,14 +116,18 @@ fun GroupCard(
             }
 
             if (items.isEmpty()) {
+                // 空态整块可点：先切到这个集再打开选择器，保证新图真的落进这里
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(88.dp),
+                        .height(88.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                        .clickable { onAddHere() },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        "这个壁纸集还是空的，点右下角 + 添加",
+                        "这个壁纸集还是空的，点这里添加壁纸",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

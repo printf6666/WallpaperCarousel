@@ -212,6 +212,8 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     // 排序页里点缩略图 → 移动到其它壁纸集
     var movingWallpaper by remember { mutableStateOf<String?>(null) }
     var tipsExpanded by remember { mutableStateOf(false) }
+    // 设置卡片里的「高级设置」折叠区（按规则自动切组等不常用项）
+    var advancedExpanded by remember { mutableStateOf(false) }
 
     // 系统权限状态：必须是 State，否则从系统设置页返回后不会触发重组，界面一直停在旧状态
     var canExact by remember { mutableStateOf(RotationScheduler.canScheduleExact(ctx)) }
@@ -224,6 +226,8 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     var currentGroupId by remember { mutableStateOf(Prefs.currentGroupId(ctx)) }
     var editingGroup by remember { mutableStateOf<Prefs.Group?>(null) }
     var pendingDeleteGroup by remember { mutableStateOf<Prefs.Group?>(null) }
+    // 打开相册前就定好"这批图进哪个组"，避免选图期间自动切组把目标换掉
+    var pendingAddGroup by remember { mutableStateOf<String?>(null) }
 
     // 长按拖动排序壁纸集：拖拽期间用的临时顺序 + 每张卡片的纵向位置（相对这个 Column）
     val displayGroups = remember { mutableStateListOf<Prefs.Group>().apply { addAll(groups) } }
@@ -486,16 +490,20 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
 
     fun useWallpaper(name: String) = applyWallpaper(name, "应用成功")
 
+    /** 只把某个壁纸集设为"当前应用"（不立刻换壁纸），用于往空组里加图前的准备 */
+    fun selectGroup(g: Prefs.Group) {
+        Prefs.setCurrentGroupId(ctx, g.id)
+        currentGroupId = g.id
+        // 手动指定后关掉自动切组，否则下一次轮换会被规则切走
+        if (settings.autoSwitch) update(settings.copy(autoSwitch = false))
+    }
+
     /**
      * 「应用」某个壁纸集：设为当前播放的组，并立即用组里的一张图刷新桌面，
      * 让「应用中」有真实反馈。空组只切状态并提示，绝不退回别的组去播。
      */
     fun applyGroup(g: Prefs.Group) {
-        Prefs.setCurrentGroupId(ctx, g.id)
-        currentGroupId = g.id
-        // 手动指定后关掉自动切组，否则下一次轮换会被规则切走
-        if (settings.autoSwitch) update(settings.copy(autoSwitch = false))
-
+        selectGroup(g)
         val items = Prefs.getWallpaperNames(ctx)
             .filter { Prefs.wallpaperGroup(ctx, it) == g.id }
         if (items.isEmpty()) {
@@ -510,9 +518,13 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     val pickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(9)
     ) { uris ->
-        if (uris.isEmpty()) return@rememberLauncherForActivityResult
-        // 新图统一进"当前应用的组"，想放到别的组请先点那张卡片的「应用」
-        val target = Prefs.currentGroupId(ctx)
+        if (uris.isEmpty()) {
+            pendingAddGroup = null
+            return@rememberLauncherForActivityResult
+        }
+        // 目标组在打开选择器前就定好了：FAB = 当前应用的组，空组点击 = 那个组
+        val target = pendingAddGroup ?: Prefs.currentGroupId(ctx)
+        pendingAddGroup = null
         scope.launch {
             val added = withContext(Dispatchers.IO) { uris.mapNotNull { WallpaperStore.add(ctx, it) } }
             if (added.isEmpty()) {
@@ -588,6 +600,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         floatingActionButton = {
             FloatingActionButton(onClick = {
                 // 新图统一进"当前应用的组"
+                pendingAddGroup = Prefs.currentGroupId(ctx)
                 pickerLauncher.launch(
                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                 )
@@ -686,19 +699,32 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("按规则自动切组", style = MaterialTheme.typography.labelLarge)
-                            Text(
-                                "工作日/周末、白天/夜晚等，命中规则的组生效；未设置规则时不切换",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                    // 不常用项收进折叠区，默认只留一行，免得首屏太长看不到壁纸卡片
+                    TextButton(onClick = { advancedExpanded = !advancedExpanded }) {
+                        Text(
+                            when {
+                                advancedExpanded -> "收起高级设置"
+                                settings.autoSwitch -> "高级设置 · 自动切组已开启"
+                                else -> "高级设置"
+                            }
+                        )
+                    }
+                    if (advancedExpanded) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("按规则自动切组", style = MaterialTheme.typography.labelLarge)
+                                Text(
+                                    "工作日/周末、白天/夜晚等，命中规则的组生效；未设置规则时不切换。" +
+                                        "规则在壁纸集卡片的「设置」里配置。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = settings.autoSwitch,
+                                onCheckedChange = { update(settings.copy(autoSwitch = it)) }
                             )
                         }
-                        Switch(
-                            checked = settings.autoSwitch,
-                            onCheckedChange = { update(settings.copy(autoSwitch = it)) }
-                        )
                     }
 
                     Button(
@@ -851,6 +877,16 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                                     }
                                 },
                                 onApply = { applyGroup(g) },
+                                onAddHere = {
+                                    // 点空态：先把这个集设为当前应用，再打开选择器，图才会落进这里
+                                    selectGroup(g)
+                                    pendingAddGroup = g.id
+                                    pickerLauncher.launch(
+                                        PickVisualMediaRequest(
+                                            ActivityResultContracts.PickVisualMedia.ImageOnly
+                                        )
+                                    )
+                                },
                                 onSort = { sortingGroupId = g.id },
                                 onSettings = { editingGroup = g },
                                 onUse = { useWallpaper(it) },
@@ -862,7 +898,8 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 }
             }
 
-            Spacer(Modifier.height(48.dp))
+            // 给右下角 FAB 留出空间（56dp 按钮 + 16dp 边距），否则会盖住最后一张卡片
+            Spacer(Modifier.height(96.dp))
         }
     }
 
