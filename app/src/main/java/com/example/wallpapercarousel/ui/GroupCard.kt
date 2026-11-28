@@ -78,7 +78,7 @@ fun GroupCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        "${group.modeText()} · 左右自由滑动",
+                        "左右自由滑动 · 点击编辑",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1
