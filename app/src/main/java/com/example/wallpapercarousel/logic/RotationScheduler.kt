@@ -40,16 +40,7 @@ object RotationScheduler {
             return
         }
 
-        val now = System.currentTimeMillis()
-        var triggerAt = now + s.intervalMinutes * 60_000L
-
-        // 开着自动切组：如果下一次"规则切换点"比正常轮换更早，
-        // 就在切换点补一次闹钟，让白天/夜晚组按点生效，而不是等下一个间隔。
-        if (s.autoSwitch) {
-            GroupResolver.nextBoundary(Prefs.groups(ctx), now)?.let { boundary ->
-                if (boundary in (now + 5_000)..triggerAt) triggerAt = boundary
-            }
-        }
+        val triggerAt = System.currentTimeMillis() + s.intervalMinutes * 60_000L
 
         if (canScheduleExact(ctx)) {
             am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent(ctx))

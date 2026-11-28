@@ -29,7 +29,6 @@ object WallpaperApplier {
      * 应用下一张壁纸。
      *
      * 播放范围：**只有当前应用的那一个壁纸集**（点卡片上的「应用」切换）。
-     * - 开了「自动切组」时先按星期/时段规则解析当前组；
      * - 组里没有可用壁纸时直接返回 false，不再退回"全部壁纸"，
      *   否则会出现"应用了空组却还在播别的组"的错觉。
      *
@@ -40,14 +39,6 @@ object WallpaperApplier {
         val s = Prefs.load(context)
         val groups = Prefs.groups(context)
 
-        // 自动模式：命中规则的组优先，没命中就保持用户手动选的那组
-        if (s.autoSwitch) {
-            val resolved = GroupResolver.matching(groups)?.id
-            if (resolved != null && resolved != Prefs.currentGroupId(context)) {
-                Log.i(TAG, "auto switch group -> $resolved")
-                Prefs.setCurrentGroupId(context, resolved)
-            }
-        }
         val groupId = Prefs.currentGroupId(context)
 
         val all = Prefs.getWallpaperNames(context)

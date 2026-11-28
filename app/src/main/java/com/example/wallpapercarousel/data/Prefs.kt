@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.RectF
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.Calendar
 
 /**
  * 设置持久化：SharedPreferences + JSON
@@ -23,8 +22,6 @@ object Prefs {
     data class Settings(
         val enabled: Boolean = false,
         val intervalMinutes: Int = 30,
-        /** 是否按每组的星期/时段规则自动切组（只影响「当前应用」的组之间怎么选） */
-        val autoSwitch: Boolean = false,
     )
 
     /**
@@ -38,37 +35,7 @@ object Prefs {
         val name: String,
         /** 组内切换方式：MODE_SEQUENTIAL / MODE_RANDOM */
         val mode: Int = MODE_SEQUENTIAL,
-        /** 生效星期：1=周一 … 7=周日；空集合表示每天 */
-        val days: Set<Int> = emptySet(),
-        /** 生效时段起点（当天第几分钟，0..1439），-1 表示不限 */
-        val startMin: Int = -1,
-        /** 生效时段终点，-1 表示不限；start > end 表示跨天（如 19:00→07:00） */
-        val endMin: Int = -1,
-    ) {
-        /** 是否配置了自动生效规则；没规则的组只能被手动选用 */
-        val hasRule: Boolean
-            get() = days.isNotEmpty() || (startMin >= 0 && endMin >= 0 && startMin != endMin)
-
-        /** 这个时刻是否命中本组规则（不含「无规则」的兜底情况） */
-        fun matches(cal: Calendar): Boolean {
-            if (!hasRule) return false
-            if (days.isNotEmpty()) {
-                // Calendar：1=周日 … 7=周六 → 统一成 1=周一 … 7=周日
-                val dow = ((cal.get(Calendar.DAY_OF_WEEK) + 5) % 7) + 1
-                if (dow !in days) return false
-            }
-            if (startMin >= 0 && endMin >= 0 && startMin != endMin) {
-                val m = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-                val inWindow = if (startMin < endMin) {
-                    m >= startMin && m < endMin
-                } else {
-                    m >= startMin || m < endMin
-                }
-                if (!inWindow) return false
-            }
-            return true
-        }
-    }
+    )
 
     private fun sp(ctx: Context) =
         ctx.getSharedPreferences("wallpaper_carousel", Context.MODE_PRIVATE)
@@ -78,14 +45,12 @@ object Prefs {
     fun load(ctx: Context) = Settings(
         enabled = sp(ctx).getBoolean("enabled", false),
         intervalMinutes = sp(ctx).getInt("interval_minutes", 30),
-        autoSwitch = sp(ctx).getBoolean("auto_switch", false),
     )
 
     fun save(ctx: Context, s: Settings) {
         sp(ctx).edit()
             .putBoolean("enabled", s.enabled)
             .putInt("interval_minutes", s.intervalMinutes)
-            .putBoolean("auto_switch", s.autoSwitch)
             .apply()
     }
 
@@ -186,19 +151,10 @@ object Prefs {
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             val id = o.optString("id", "")
             if (id.isBlank()) return@mapNotNull null
-            val daysArr = o.optJSONArray("days")
-            val days = if (daysArr == null) {
-                emptySet()
-            } else {
-                (0 until daysArr.length()).map { daysArr.optInt(it) }.filter { it in 1..7 }.toSet()
-            }
             Group(
                 id = id,
                 name = o.optString("name", "未命名"),
                 mode = if (o.optInt("mode", MODE_SEQUENTIAL) == MODE_RANDOM) MODE_RANDOM else MODE_SEQUENTIAL,
-                days = days,
-                startMin = o.optInt("startMin", -1),
-                endMin = o.optInt("endMin", -1),
             )
         }
     }
@@ -210,9 +166,6 @@ object Prefs {
                 put("id", g.id)
                 put("name", g.name)
                 put("mode", g.mode)
-                put("days", JSONArray(g.days.sorted()))
-                put("startMin", g.startMin)
-                put("endMin", g.endMin)
             })
         }
         return arr.toString()

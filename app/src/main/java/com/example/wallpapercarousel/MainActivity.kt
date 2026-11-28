@@ -209,8 +209,6 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     // 排序页里点缩略图 → 移动到其它壁纸集
     var movingWallpaper by remember { mutableStateOf<String?>(null) }
     var tipsExpanded by remember { mutableStateOf(false) }
-    // 设置卡片里的「高级设置」折叠区（按规则自动切组等不常用项）
-    var advancedExpanded by remember { mutableStateOf(false) }
 
     // 系统权限状态：必须是 State，否则从系统设置页返回后不会触发重组，界面一直停在旧状态
     var canExact by remember { mutableStateOf(RotationScheduler.canScheduleExact(ctx)) }
@@ -491,8 +489,6 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     fun selectGroup(g: Prefs.Group) {
         Prefs.setCurrentGroupId(ctx, g.id)
         currentGroupId = g.id
-        // 手动指定后关掉自动切组，否则下一次轮换会被规则切走
-        if (settings.autoSwitch) update(settings.copy(autoSwitch = false))
     }
 
     /**
@@ -666,34 +662,6 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
 
                     // 切换方式（组内顺序 / 组内随机）只在壁纸集卡片的「设置」里改，
                     // 主界面不再提供入口，避免同一个设置有两个地方可改。
-
-                    // 不常用项收进折叠区，默认只留一行，免得首屏太长看不到壁纸卡片
-                    TextButton(onClick = { advancedExpanded = !advancedExpanded }) {
-                        Text(
-                            when {
-                                advancedExpanded -> "收起高级设置"
-                                settings.autoSwitch -> "高级设置 · 自动切组已开启"
-                                else -> "高级设置"
-                            }
-                        )
-                    }
-                    if (advancedExpanded) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("按规则自动切组", style = MaterialTheme.typography.labelLarge)
-                                Text(
-                                    "工作日/周末、白天/夜晚等，命中规则的组生效；未设置规则时不切换。" +
-                                        "规则在壁纸集卡片的「设置」里配置。",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = settings.autoSwitch,
-                                onCheckedChange = { update(settings.copy(autoSwitch = it)) }
-                            )
-                        }
-                    }
 
                     Button(
                         onClick = { rotateNow() },
