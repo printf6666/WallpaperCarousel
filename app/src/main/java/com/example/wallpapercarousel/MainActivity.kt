@@ -40,13 +40,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -291,6 +289,8 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
     fun refresh() {
         settings = Prefs.load(ctx)
         val names = Prefs.getWallpaperNames(ctx)
+        // 老数据没有 grp_ 记录，补写一次显式归属，避免壁纸集换位置时整组"漂移"
+        Prefs.normalizeWallpaperGroups(ctx, names)
         if (names != wallpapers.toList()) {
             wallpapers.clear()
             wallpapers.addAll(names)
@@ -347,22 +347,50 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         draggingGroupId = null
         groupDragOffset = 0f
         val ordered = displayGroups.toList()
-        if (ordered.map { it.id } != groups.map { it.id }) persistGroups(ordered)
+        if (ordered.map { it.id } != groups.map { it.id }) {
+            // 换位置之前先把每张壁纸的归属写死：归属只能由用户操作决定，
+            // 绝不能因为"谁排在第一个"就跟着变
+            Prefs.normalizeWallpaperGroups(ctx, Prefs.getWallpaperNames(ctx))
+            persistGroups(ordered)
+        }
     }
 
+    /**
+     * 删除壁纸集：**组里的壁纸一并删除**（文件、裁剪、缓存、归属全清），不再并入其它组。
+     * 删掉之后想要这些图只能重新导入，所以调用前必须先让用户确认。
+     */
     fun deleteGroup(g: Prefs.Group) {
         if (groups.size <= 1) {
             Toast.makeText(ctx, "至少保留一个壁纸集", Toast.LENGTH_SHORT).show()
             return
         }
-        val rest = groups.filter { it.id != g.id }
-        val target = rest.first()
-        // 组里的壁纸不跟着删，整体并入第一个组
-        wallpapers
+        val doomed = Prefs.getWallpaperNames(ctx)
             .filter { Prefs.wallpaperGroup(ctx, it) == g.id }
-            .forEach { Prefs.setWallpaperGroup(ctx, it, target.id) }
-        if (Prefs.currentGroupId(ctx) == g.id) Prefs.setCurrentGroupId(ctx, target.id)
+        doomed.forEach { name ->
+            WallpaperStore.remove(ctx, name)
+            Prefs.clearCrop(ctx, name)
+            Prefs.clearWallpaperGroup(ctx, name)
+            WallpaperCache.remove(ctx, name)
+        }
+        if (doomed.isNotEmpty()) {
+            Prefs.setWallpaperNames(
+                ctx,
+                Prefs.getWallpaperNames(ctx).filterNot { it in doomed }
+            )
+            if (Prefs.getLastName(ctx) in doomed) Prefs.clearLastName(ctx)
+        }
+        val rest = groups.filter { it.id != g.id }
+        // 删的是正在应用的组：当前组回落到剩下的第一个（壁纸集顺序变了，这里也顺手校准）
+        if (Prefs.currentGroupId(ctx) == g.id) Prefs.setCurrentGroupId(ctx, rest.first().id)
+        if (sortingGroupId == g.id) sortingGroupId = null
         persistGroups(rest)
+        refresh()
+        if (settings.enabled) RotationScheduler.scheduleNext(ctx)
+        Toast.makeText(
+            ctx,
+            if (doomed.isEmpty()) "已删除「${g.name}」" else "已删除「${g.name}」和 ${doomed.size} 张壁纸",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     /**
@@ -515,7 +543,7 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
             pendingAddGroup = null
             return@rememberLauncherForActivityResult
         }
-        // 目标组在打开选择器前就定好了：FAB = 当前应用的组，空组点击 = 那个组
+        // 目标组在打开选择器前就定好了：卡片上的「＋」= 那一组，空态点击 = 那一组
         val target = pendingAddGroup ?: Prefs.currentGroupId(ctx)
         pendingAddGroup = null
         scope.launch {
@@ -526,11 +554,30 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 Prefs.setWallpaperNames(ctx, Prefs.getWallpaperNames(ctx) + added)
                 assignToGroup(added, target)
                 refresh()
-                Toast.makeText(ctx, "已添加 ${added.size} 张壁纸", Toast.LENGTH_SHORT).show()
+                val targetName = Prefs.groups(ctx).firstOrNull { it.id == target }?.name
+                Toast.makeText(
+                    ctx,
+                    if (targetName == null) "已添加 ${added.size} 张壁纸"
+                    else "已添加 ${added.size} 张到「$targetName」",
+                    Toast.LENGTH_SHORT
+                ).show()
                 if (Prefs.load(ctx).enabled) RotationScheduler.scheduleNext(ctx)
                 prewarm(added)
             }
         }
+    }
+
+    /**
+     * 往指定壁纸集加图。
+     *
+     * 只固定"这批图进哪个组"，**不**把该组切成正在应用的组 —— 加图和应用是两件事，
+     * 否则往壁纸集 2 里补几张图会把正在轮播的壁纸集 1 顶掉。
+     */
+    fun addToGroup(g: Prefs.Group) {
+        pendingAddGroup = g.id
+        pickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
     }
 
     fun requestIgnoreBatteryOpt() {
@@ -590,17 +637,6 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 }
             })
         },
-        floatingActionButton = {
-            FloatingActionButton(onClick = {
-                // 新图统一进"当前应用的组"
-                pendingAddGroup = Prefs.currentGroupId(ctx)
-                pickerLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                )
-            }) {
-                Icon(Icons.Filled.Add, contentDescription = "添加壁纸")
-            }
-        }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -813,16 +849,8 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                                     }
                                 },
                                 onApply = { applyGroup(g) },
-                                onAddHere = {
-                                    // 点空态：先把这个集设为当前应用，再打开选择器，图才会落进这里
-                                    selectGroup(g)
-                                    pendingAddGroup = g.id
-                                    pickerLauncher.launch(
-                                        PickVisualMediaRequest(
-                                            ActivityResultContracts.PickVisualMedia.ImageOnly
-                                        )
-                                    )
-                                },
+                                onAdd = { addToGroup(g) },
+                                onAddHere = { addToGroup(g) },
                                 onSort = { sortingGroupId = g.id },
                                 onSettings = { editingGroup = g },
                                 onUse = { useWallpaper(it) },
@@ -834,8 +862,8 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                 }
             }
 
-            // 给右下角 FAB 留出空间（56dp 按钮 + 16dp 边距），否则会盖住最后一张卡片
-            Spacer(Modifier.height(96.dp))
+            // 右下角不再有 FAB，底部只留一点呼吸空间
+            Spacer(Modifier.height(24.dp))
         }
     }
 
@@ -946,14 +974,20 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
         )
     }
 
-    // 删除壁纸集确认
+    // 删除壁纸集确认：壁纸会一起删掉，必须说清楚不可恢复
     pendingDeleteGroup?.let { g ->
+        val count = wallpapers.count { Prefs.wallpaperGroup(ctx, it) == g.id }
         AlertDialog(
             onDismissRequest = { pendingDeleteGroup = null },
             title = { Text("删除壁纸集") },
             text = {
                 Text(
-                    "确定删除「${g.name}」？\n组里的壁纸不会丢，会并入第一个壁纸集。"
+                    if (count == 0) {
+                        "确定删除「${g.name}」？"
+                    } else {
+                        "「${g.name}」里的 $count 张壁纸会一起删除，无法恢复。\n\n" +
+                            "删掉后想再用这些图，只能重新导入。"
+                    }
                 )
             },
             confirmButton = {
@@ -961,7 +995,10 @@ fun AppScreen(sharedUris: MutableStateFlow<List<Uri>>) {
                     pendingDeleteGroup = null
                     deleteGroup(g)
                 }) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
+                    Text(
+                        if (count == 0) "删除" else "删除壁纸集和 $count 张壁纸",
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
             },
             dismissButton = {

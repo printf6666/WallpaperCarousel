@@ -132,11 +132,42 @@ object Prefs {
     fun setCurrentGroupId(ctx: Context, id: String) =
         sp(ctx).edit().putString("current_group", id).apply()
 
-    /** 某张壁纸属于哪个组；查不到（旧数据）就落到第一个组 */
+    /**
+     * 某张壁纸属于哪个组；查不到（旧数据/组已删）时落到**默认组**。
+     *
+     * 注意兜底不能用 `ids.first()`：那取的是"列表第一个组"，而壁纸集是可以长按拖动
+     * 换位置的 —— 一旦换了位置，所有没写过归属的壁纸就会整体"漂"到新的第一个组里。
+     * 所以这里优先落到固定的 [DEFAULT_GROUP_ID]，并立刻把结果写回，永久固化下来。
+     */
     fun wallpaperGroup(ctx: Context, name: String): String {
         val ids = groups(ctx).map { it.id }
         val saved = sp(ctx).getString("grp_$name", null)
-        return if (saved != null && saved in ids) saved else ids.first()
+        if (saved != null && saved in ids) return saved
+        val fallback = if (DEFAULT_GROUP_ID in ids) DEFAULT_GROUP_ID else ids.first()
+        sp(ctx).edit().putString("grp_$name", fallback).apply()
+        return fallback
+    }
+
+    /**
+     * 给所有还没写过归属的壁纸补一条显式记录。
+     *
+     * 老版本迁移过来的壁纸只有"壁纸列表"、没有 `grp_` 记录，全靠兜底推断；
+     * 补写一次之后，壁纸集怎么换位置都不会再影响它们归谁。
+     */
+    fun normalizeWallpaperGroups(ctx: Context, names: List<String>) {
+        val ids = groups(ctx).map { it.id }
+        if (ids.isEmpty()) return
+        val fallback = if (DEFAULT_GROUP_ID in ids) DEFAULT_GROUP_ID else ids.first()
+        val e = sp(ctx).edit()
+        var dirty = false
+        names.forEach { n ->
+            val saved = sp(ctx).getString("grp_$n", null)
+            if (saved == null || saved !in ids) {
+                e.putString("grp_$n", fallback)
+                dirty = true
+            }
+        }
+        if (dirty) e.apply()
     }
 
     fun setWallpaperGroup(ctx: Context, name: String, groupId: String) =

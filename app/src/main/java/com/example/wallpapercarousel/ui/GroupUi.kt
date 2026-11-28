@@ -96,7 +96,8 @@ fun GroupEditDialog(
 
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        // 左下角：删除壁纸集（红色描边环）。组里的壁纸不会丢，会并入第一个壁纸集
+                        // 左下角：删除壁纸集（红色描边环）。点了会再弹一次确认：
+                        // 组里的壁纸会一起删除，不可恢复（不再并入其它壁纸集）
                         OutlinedButton(
                             onClick = onDelete,
                             enabled = canDelete,
