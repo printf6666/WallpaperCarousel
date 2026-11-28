@@ -11,10 +11,10 @@ import java.util.Calendar
  */
 object Prefs {
 
-    /** 组内/全部播放：顺序 */
+    /** 组内播放：顺序 */
     const val MODE_SEQUENTIAL = 0
 
-    /** 组内/全部播放：随机 */
+    /** 组内播放：随机 */
     const val MODE_RANDOM = 1
 
     /** 找不到任何组时的兜底组 id（同时也是旧版本的迁移目标） */
@@ -23,11 +23,7 @@ object Prefs {
     data class Settings(
         val enabled: Boolean = false,
         val intervalMinutes: Int = 30,
-        /** 「全部播放」时的切换方式；分组播放时用各组的 mode */
-        val randomOrder: Boolean = false,
-        /** false = 分组播放（一次只用一组），true = 全部播放（所有壁纸一个池子） */
-        val scopeAll: Boolean = false,
-        /** 分组播放时，是否按每组的星期/时段规则自动切组 */
+        /** 是否按每组的星期/时段规则自动切组（只影响「当前应用」的组之间怎么选） */
         val autoSwitch: Boolean = false,
     )
 
@@ -82,8 +78,6 @@ object Prefs {
     fun load(ctx: Context) = Settings(
         enabled = sp(ctx).getBoolean("enabled", false),
         intervalMinutes = sp(ctx).getInt("interval_minutes", 30),
-        randomOrder = sp(ctx).getBoolean("random_order", false),
-        scopeAll = sp(ctx).getBoolean("scope_all", false),
         autoSwitch = sp(ctx).getBoolean("auto_switch", false),
     )
 
@@ -91,8 +85,6 @@ object Prefs {
         sp(ctx).edit()
             .putBoolean("enabled", s.enabled)
             .putInt("interval_minutes", s.intervalMinutes)
-            .putBoolean("random_order", s.randomOrder)
-            .putBoolean("scope_all", s.scopeAll)
             .putBoolean("auto_switch", s.autoSwitch)
             .apply()
     }

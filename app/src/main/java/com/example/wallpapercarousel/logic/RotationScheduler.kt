@@ -43,9 +43,9 @@ object RotationScheduler {
         val now = System.currentTimeMillis()
         var triggerAt = now + s.intervalMinutes * 60_000L
 
-        // 分组播放且开着自动切组：如果下一次"规则切换点"比正常轮换更早，
+        // 开着自动切组：如果下一次"规则切换点"比正常轮换更早，
         // 就在切换点补一次闹钟，让白天/夜晚组按点生效，而不是等下一个间隔。
-        if (!s.scopeAll && s.autoSwitch) {
+        if (s.autoSwitch) {
             GroupResolver.nextBoundary(Prefs.groups(ctx), now)?.let { boundary ->
                 if (boundary in (now + 5_000)..triggerAt) triggerAt = boundary
             }

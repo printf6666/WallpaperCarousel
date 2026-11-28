@@ -28,11 +28,12 @@ object WallpaperApplier {
     /**
      * 应用下一张壁纸。
      *
-     * 播放范围：
-     * - 分组播放：只在当前组里挑；开了「自动切组」时先按星期/时段规则解析当前组；
-     * - 全部播放：所有壁纸一个池子，忽略分组。
+     * 播放范围：**只有当前应用的那一个壁纸集**（点卡片上的「应用」切换）。
+     * - 开了「自动切组」时先按星期/时段规则解析当前组；
+     * - 组里没有可用壁纸时直接返回 false，不再退回"全部壁纸"，
+     *   否则会出现"应用了空组却还在播别的组"的错觉。
      *
-     * 切换方式：分组播放用组自己的 mode，全部播放用设置里的 randomOrder。
+     * 切换方式：用该组自己的 mode（组内顺序 / 组内随机）。
      * 随机模式不会连续重复同一张；顺序模式从"上次应用的那张"往后走一格。
      */
     fun applyNext(context: Context, reschedule: Boolean = false): Boolean {
@@ -40,7 +41,7 @@ object WallpaperApplier {
         val groups = Prefs.groups(context)
 
         // 自动模式：命中规则的组优先，没命中就保持用户手动选的那组
-        if (!s.scopeAll && s.autoSwitch) {
+        if (s.autoSwitch) {
             val resolved = GroupResolver.matching(groups)?.id
             if (resolved != null && resolved != Prefs.currentGroupId(context)) {
                 Log.i(TAG, "auto switch group -> $resolved")
@@ -51,23 +52,13 @@ object WallpaperApplier {
 
         val all = Prefs.getWallpaperNames(context)
             .filter { WallpaperStore.file(context, it).exists() }
-        if (all.isEmpty()) return false
-
-        val groupIndex = groups.mapIndexed { i, g -> g.id to i }.toMap()
-        val pool = if (s.scopeAll) {
-            // 全部播放也遵守"组与组之间的顺序"：先按组分块，块内保持全局顺序
-            all.sortedBy { groupIndex[Prefs.wallpaperGroup(context, it)] ?: Int.MAX_VALUE }
-        } else {
-            val inGroup = all.filter { Prefs.wallpaperGroup(context, it) == groupId }
-            // 组里还没放图时不空转，退回全部，用户加完图后自动恢复正常
-            if (inGroup.isEmpty()) all else inGroup
+        val pool = all.filter { Prefs.wallpaperGroup(context, it) == groupId }
+        if (pool.isEmpty()) {
+            Log.i(TAG, "current group $groupId has no wallpaper, skip")
+            return false
         }
 
-        val random = if (s.scopeAll) {
-            s.randomOrder
-        } else {
-            groups.firstOrNull { it.id == groupId }?.mode == Prefs.MODE_RANDOM
-        }
+        val random = groups.firstOrNull { it.id == groupId }?.mode == Prefs.MODE_RANDOM
 
         val lastName = Prefs.getLastName(context)
         val idx = when {

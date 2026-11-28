@@ -61,44 +61,8 @@ private fun formatMinute(m: Int): String {
 }
 
 /**
- * 分组选择条：全部（null）+ 各壁纸集 + 新建。
- * 点某个组 = 切到该组（同时改变当前播放组），点"全部"只是看全部壁纸。
+ * 分组管理：改顺序、编辑规则、删除
  */
-@Composable
-fun GroupChips(
-    groups: List<Prefs.Group>,
-    selectedId: String?,
-    counts: Map<String, Int>,
-    onSelect: (String?) -> Unit,
-    onAdd: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        FilterChip(
-            selected = selectedId == null,
-            onClick = { onSelect(null) },
-            label = { Text("全部") }
-        )
-        groups.forEach { g ->
-            FilterChip(
-                selected = selectedId == g.id,
-                onClick = { onSelect(g.id) },
-                label = { Text("${g.name}（${counts[g.id] ?: 0}）") }
-            )
-        }
-        FilterChip(
-            selected = false,
-            onClick = onAdd,
-            label = { Text("＋ 新建") }
-        )
-    }
-}
-
-/** 分组管理：改顺序、编辑规则、删除 */
 @Composable
 fun GroupManagerDialog(
     groups: List<Prefs.Group>,
